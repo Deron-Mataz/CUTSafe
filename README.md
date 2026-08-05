@@ -4,7 +4,7 @@
   <img src="https://img.shields.io/badge/Flutter-3.x-02569B?style=for-the-badge&logo=flutter&logoColor=white">
   <img src="https://img.shields.io/badge/Dart-Language-0175C2?style=for-the-badge&logo=dart&logoColor=white">
   <img src="https://img.shields.io/badge/Firebase-Firestore-FFCA28?style=for-the-badge&logo=firebase&logoColor=black">
-  <img src="https://img.shields.io/badge/Status-90%25%20Complete-blue?style=for-the-badge">
+  <img src="https://img.shields.io/badge/Status-80%25%20Complete-blue?style=for-the-badge">
 </p>
 
 <h1 align="center">CUT Safety</h1>
