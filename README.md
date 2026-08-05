@@ -10,14 +10,14 @@
 <h1 align="center">CUT Safety</h1>
 
 <p align="center">
-A Flutter mobile application for the <strong>Central University of Technology (CUT)</strong> community to report incidents, share safety updates, and coordinate through groups — backed by a role-protected Security interface for campus safety personnel.
+A Flutter mobile application for the <strong>Central University of Technology (CUT)</strong> community to report incidents, share safety updates, and coordinate through groups, backed by a role-protected Security interface for campus safety personnel.
 </p>
 
 ---
 
 # 📖 Overview
 
-**CUT Safety** is a cross-platform mobile app built with **Flutter** and **Dart**, designed to keep the CUT student community connected and informed on campus safety. Users can report incidents, post safety updates, and organise through groups — all in real time.
+**CUT Safety** is a cross-platform mobile app built with **Flutter** and **Dart**, designed to keep the CUT student community connected and informed on campus safety. Users can report incidents, post safety updates, and organise through groups, all in real time.
 
 The app has two distinct experiences behind a single login: a **User** interface for the general student community, and a **Security** interface, role-protected and reserved for campus security personnel, with tools tailored to monitoring and responding to incidents. Both roles authenticate the same way, but the app routes them into entirely different interfaces based on their assigned role.
 
@@ -62,7 +62,7 @@ The application integrates with **Firebase Authentication**, **Cloud Firestore**
 ## 🛡️ Security Interface (RBA-Protected)
 
 - Separate, role-gated interface for campus security personnel
-- Same login flow as regular users — routed by role, not a separate app
+- Same login flow as regular users, routed by role, not a separate app
 - View and respond to reported alerts
 - Monitor live incident activity across campus
 - Elevated visibility into reports not available to standard users
