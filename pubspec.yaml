@@ -1,0 +1,52 @@
+name: cut_safety
+description: CUT Community Safety Platform.
+publish_to: 'none'
+version: 1.0.0+1
+
+environment:
+  sdk: '>=3.2.0 <4.0.0'
+
+dependencies:
+  flutter:
+    sdk: flutter
+
+  # State management
+  provider: ^6.1.2
+
+  # Firebase
+  firebase_core: ^3.6.0
+  firebase_auth: ^5.3.1
+  cloud_firestore: ^5.4.4
+  firebase_storage: ^12.3.2
+  firebase_messaging: ^15.1.3
+
+  # Maps & Location
+  google_maps_flutter: ^2.9.0
+  geolocator: ^13.0.1
+  geocoding: ^3.0.0
+
+  # Images
+  image_picker: ^1.1.2
+  cached_network_image: ^3.4.1
+
+  # Media (voice notes + video playback)
+  record: ^7.1.1
+  just_audio: ^0.9.42
+  path_provider: ^2.1.4
+  video_player: ^2.9.2
+
+  # Utilities
+  intl: ^0.19.0
+  url_launcher: ^6.3.1
+  flutter_local_notifications: ^17.2.3
+  shared_preferences: ^2.3.2
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^4.0.0
+
+flutter:
+  uses-material-design: true
+  assets:
+    - assets/
