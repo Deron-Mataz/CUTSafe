@@ -1,3 +1,12 @@
+import java.util.Properties
+import java.io.FileInputStream
+
+val secretsPropertiesFile = rootProject.file("secrets.properties")
+val secretsProperties = Properties()
+if (secretsPropertiesFile.exists()) {
+    secretsProperties.load(FileInputStream(secretsPropertiesFile))
+}
+
 plugins {
     id("com.android.application")
     // START: FlutterFire Configuration
@@ -32,6 +41,7 @@ android {
         targetSdk = flutter.targetSdkVersion
         versionCode = flutter.versionCode
         versionName = flutter.versionName
+        manifestPlaceholders["MAPS_API_KEY"] = secretsProperties.getProperty("MAPS_API_KEY", "")
     }
 
     buildTypes {

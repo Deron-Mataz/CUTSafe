@@ -22,6 +22,11 @@ import '../../widgets/media_viewer.dart';
 import '../profile/user_profile_screen.dart';
 import 'join_requests_screen.dart';
 
+/// Google Maps Static API key.
+/// Supplied at build/run time via --dart-define, never hardcoded.
+/// Example: flutter run --dart-define=MAPS_API_KEY=your_key_here
+const String _mapsApiKey = String.fromEnvironment('MAPS_API_KEY');
+
 const List<Color> _palette = [
   Color(0xFF1565C0),
   Color(0xFF2E7D32),
@@ -1559,7 +1564,7 @@ class _LocationContent extends StatelessWidget {
   String _staticMapUrl({required int width, required int height}) =>
       'https://maps.googleapis.com/maps/api/staticmap?center=${msg.locationLat},${msg.locationLng}'
       '&zoom=15&size=${width}x$height&markers=color:red|${msg.locationLat},${msg.locationLng}'
-      '&key=AIzaSyBQuYXkBfVLp1BBapsHAVav3K0-_j1lCtk';
+      '&key=$_mapsApiKey';
 
   String _timeLeft(DateTime expires) {
     final diff = expires.difference(DateTime.now());

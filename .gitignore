@@ -5,13 +5,18 @@
 **/GoogleService-Info.plist
 lib/firebase_options.dart
 **/firebase-service-account.json
-/firebase.json
+firebase.json
+.firebaserc
 *.jks
 *.keystore
 key.properties
 .env
 .env.*
 secrets.dart
+secrets.properties
+android/secrets.properties
+
+.vscode/launch.json
 
 ## =========================================
 ## Flutter / Dart
@@ -35,9 +40,7 @@ migrate_working_dir/
 *.iws
 .idea/
 
-# The .vscode folder contains launch configuration and tasks you configure in
-# VS Code which you may wish to be included in version control, so this line
-# is commented out by default.
+
 #.vscode/
 
 # Flutter/Dart/Pub related
