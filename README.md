@@ -106,43 +106,49 @@ The application integrates with **Firebase Authentication**, **Cloud Firestore**
 
 ### Splash &nbsp;·&nbsp; Login
 <p align="center">
-  <img src="Screenshots/Splash.jpg" width="45%" style="margin-right:20px;">
-  <img src="Screenshots/Login.jpg" width="45%">
+  <img src="Screenshots/Splash.jpg" width="30%">
+  &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;
+  <img src="Screenshots/Login.jpg" width="30%">
 </p>
 
 ### Alerts Feed &nbsp;·&nbsp; Safety Map
 <p align="center">
-  <img src="Screenshots/SafetyFeed.jpg" width="45%" style="margin-right:20px;">
-  <img src="Screenshots/SafetyMap.jpg" width="45%">
+  <img src="Screenshots/SafetyFeed.jpg" width="30%">
+  &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;
+  <img src="Screenshots/SafetyMap.jpg" width="30%">
 </p>
 
 ### Groups &nbsp;·&nbsp; Group Chat
 <p align="center">
-  <img src="Screenshots/Groups.jpg" width="45%" style="margin-right:20px;">
-  <img src="Screenshots/GroupChat.jpg" width="45%">
+  <img src="Screenshots/Groups.jpg" width="30%">
+  &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;
+  <img src="Screenshots/GroupChat.jpg" width="30%">
 </p>
 
 ### Group Members &nbsp;·&nbsp; Register
 <p align="center">
-  <img src="Screenshots/GroupMembers.jpg" width="45%" style="margin-right:20px;">
-  <img src="Screenshots/Register.jpg" width="45%">
+  <img src="Screenshots/GroupMembers.jpg" width="30%">
+  &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;
+  <img src="Screenshots/Register.jpg" width="30%">
 </p>
 
 ### SOS & Quick Dial &nbsp;·&nbsp; Settings
 <p align="center">
-  <img src="Screenshots/EmergencyScreen.jpg" width="45%" style="margin-right:20px;">
-  <img src="Screenshots/Settings.jpg" width="45%">
+  <img src="Screenshots/EmergencyScreen.jpg" width="30%">
+  &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;
+  <img src="Screenshots/Settings.jpg" width="30%">
 </p>
 
 ### Profile &nbsp;·&nbsp; Security Dashboard
 <p align="center">
-  <img src="Screenshots/Profile.jpg" width="45%" style="margin-right:20px;">
-  <img src="Screenshots/SecurityDash.jpg" width="45%">
+  <img src="Screenshots/Profile.jpg" width="30%">
+  &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;
+  <img src="Screenshots/SecurityDash.jpg" width="30%">
 </p>
 
 ### Security Report View &nbsp;
 <p align="center">
-  <img src="Screenshots/SecurityReport.jpg" width="45%">
+  <img src="Screenshots/SecurityReport.jpg" width="30%">
 </p>
 
 ---
