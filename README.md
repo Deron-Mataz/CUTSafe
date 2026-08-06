@@ -4,20 +4,20 @@
   <img src="https://img.shields.io/badge/Flutter-3.x-02569B?style=for-the-badge&logo=flutter&logoColor=white">
   <img src="https://img.shields.io/badge/Dart-Language-0175C2?style=for-the-badge&logo=dart&logoColor=white">
   <img src="https://img.shields.io/badge/Firebase-Firestore-FFCA28?style=for-the-badge&logo=firebase&logoColor=black">
-  <img src="https://img.shields.io/badge/Status-90%25%20Complete-blue?style=for-the-badge">
+  <img src="https://img.shields.io/badge/Status-80%25%20Complete-blue?style=for-the-badge">
 </p>
 
 <h1 align="center">CUT Safety</h1>
 
 <p align="center">
-A Flutter mobile application for the <strong>Central University of Technology (CUT)</strong> community to report incidents, share safety updates, and coordinate through groups — backed by a role-protected Security interface for campus safety personnel.
+A Flutter mobile application for the <strong>Central University of Technology (CUT)</strong> community to report incidents, share safety updates, and coordinate through groups, backed by a role-protected Security interface for campus safety personnel.
 </p>
 
 ---
 
 # 📖 Overview
 
-**CUT Safety** is a cross-platform mobile app built with **Flutter** and **Dart**, designed to keep the CUT student community connected and informed on campus safety. Users can report incidents, post safety updates, and organise through groups — all in real time.
+**CUT Safety** is a cross-platform mobile app built with **Flutter** and **Dart**, designed to keep the CUT student community connected and informed on campus safety. Users can report incidents, post safety updates, and organise through groups, all in real time.
 
 The app has two distinct experiences behind a single login: a **User** interface for the general student community, and a **Security** interface, role-protected and reserved for campus security personnel, with tools tailored to monitoring and responding to incidents. Both roles authenticate the same way, but the app routes them into entirely different interfaces based on their assigned role.
 
@@ -62,7 +62,7 @@ The application integrates with **Firebase Authentication**, **Cloud Firestore**
 ## 🛡️ Security Interface (RBA-Protected)
 
 - Separate, role-gated interface for campus security personnel
-- Same login flow as regular users — routed by role, not a separate app
+- Same login flow as regular users, routed by role, not a separate app
 - View and respond to reported alerts
 - Monitor live incident activity across campus
 - Elevated visibility into reports not available to standard users
@@ -106,43 +106,49 @@ The application integrates with **Firebase Authentication**, **Cloud Firestore**
 
 ### Splash &nbsp;·&nbsp; Login
 <p align="center">
-  <img src="Screenshots/Splash.jpg" width="45%" style="margin-right:20px;">
-  <img src="Screenshots/Login.jpg" width="45%">
+  <img src="Screenshots/Splash.jpg" width="30%">
+  &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;
+  <img src="Screenshots/Login.jpg" width="30%">
 </p>
 
 ### Alerts Feed &nbsp;·&nbsp; Safety Map
 <p align="center">
-  <img src="Screenshots/SafetyFeed.jpg" width="45%" style="margin-right:20px;">
-  <img src="Screenshots/SafetyMap.jpg" width="45%">
+  <img src="Screenshots/SafetyFeed.jpg" width="30%">
+  &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;
+  <img src="Screenshots/SafetyMap.jpg" width="30%">
 </p>
 
 ### Groups &nbsp;·&nbsp; Group Chat
 <p align="center">
-  <img src="Screenshots/Groups.jpg" width="45%" style="margin-right:20px;">
-  <img src="Screenshots/GroupChat.jpg" width="45%">
+  <img src="Screenshots/Groups.jpg" width="30%">
+  &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;
+  <img src="Screenshots/GroupChat.jpg" width="30%">
 </p>
 
 ### Group Members &nbsp;·&nbsp; Register
 <p align="center">
-  <img src="Screenshots/GroupMembers.jpg" width="45%" style="margin-right:20px;">
-  <img src="Screenshots/Register.jpg" width="45%">
+  <img src="Screenshots/GroupMembers.jpg" width="30%">
+  &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;
+  <img src="Screenshots/Register.jpg" width="30%">
 </p>
 
 ### SOS & Quick Dial &nbsp;·&nbsp; Settings
 <p align="center">
-  <img src="Screenshots/EmergencyScreen.jpg" width="45%" style="margin-right:20px;">
-  <img src="Screenshots/Settings.jpg" width="45%">
+  <img src="Screenshots/EmergencyScreen.jpg" width="30%">
+  &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;
+  <img src="Screenshots/Settings.jpg" width="30%">
 </p>
 
 ### Profile &nbsp;·&nbsp; Security Dashboard
 <p align="center">
-  <img src="Screenshots/Profile.jpg" width="45%" style="margin-right:20px;">
-  <img src="Screenshots/SecurityDash.jpg" width="45%">
+  <img src="Screenshots/Profile.jpg" width="30%">
+  &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;
+  <img src="Screenshots/SecurityDash.jpg" width="30%">
 </p>
 
 ### Security Report View &nbsp;
 <p align="center">
-  <img src="Screenshots/SecurityReport.jpg" width="45%">
+  <img src="Screenshots/SecurityReport.jpg" width="30%">
 </p>
 
 ---
