@@ -2,7 +2,10 @@ import 'dart:async';
 import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:cached_network_image/cached_network_image.dart';
+import 'package:google_maps_flutter/google_maps_flutter.dart';
 import 'package:image_picker/image_picker.dart';
+import 'package:video_player/video_player.dart';
+import 'package:flutter_cache_manager/flutter_cache_manager.dart';
 import 'package:just_audio/just_audio.dart';
 import 'package:record/record.dart';
 import 'package:path_provider/path_provider.dart';
@@ -22,10 +25,22 @@ import '../../widgets/media_viewer.dart';
 import '../profile/user_profile_screen.dart';
 import 'join_requests_screen.dart';
 
-/// Google Maps Static API key.
-/// Supplied at build/run time via --dart-define, never hardcoded.
-/// Example: flutter run --dart-define=MAPS_API_KEY=your_key_here
-const String _mapsApiKey = String.fromEnvironment('MAPS_API_KEY');
+// Shared cache manager for all chat media (images + videos). Keeps files
+// on-device for a year and allows a generous cache size, so media only
+// downloads once per device — matching WhatsApp-style local persistence.
+final CacheManager chatMediaCacheManager = CacheManager(
+  Config(
+    'cutSafetyChatMediaCache',
+    stalePeriod: const Duration(days: 365),
+    maxNrOfCacheObjects: 500,
+  ),
+);
+
+// Sender ("mine") bubble palette — deliberately a soft light blue,
+// distinct from the app's main brand blue, with dark text for contrast.
+const Color _myBubbleColor = Color(0xFFDCEEFF);
+const Color _myBubbleBorder = Color(0xFFB6DBFF);
+const Color _myBubbleTextColor = Color(0xFF0B4A7A);
 
 const List<Color> _palette = [
   Color(0xFF1565C0),
@@ -68,18 +83,55 @@ class _ChatScreenState extends State<ChatScreen> {
   bool _uploadingCover = false;
   bool _sendingMedia = false;
 
+  // Streams created ONCE — never call these methods inline inside build().
+  // Doing so recreates the subscription on every setState/rebuild (i.e.
+  // every button press), which resets the StreamBuilder to a loading
+  // state and makes the whole chat look like it's "refreshing".
+  late final Stream<GroupModel?> _groupStream;
+  late final Stream<List<GroupMessage>> _messagesStream;
+
+  @override
+  void initState() {
+    super.initState();
+    _groupStream = FirebaseService.instance.groupStream(widget.group.id);
+    _messagesStream = FirebaseService.instance.messagesStream(widget.group.id);
+  }
+
   // Voice recording state
   final AudioRecorder _recorder = AudioRecorder();
   bool _isRecording = false;
-  int _recordSeconds = 0;
-  Timer? _recordTimer;
   String? _recordPath;
+
+  // Reply state
+  GroupMessage? _replyingTo;
+
+  void _startReply(GroupMessage msg) {
+    setState(() => _replyingTo = msg);
+    FocusScope.of(context).requestFocus(FocusNode());
+  }
+
+  void _cancelReply() => setState(() => _replyingTo = null);
+
+  String _replyPreviewFor(GroupMessage msg) {
+    switch (msg.messageType) {
+      case MessageType.image:
+        return '📷 Photo';
+      case MessageType.video:
+        return '🎥 Video';
+      case MessageType.voice:
+        return '🎤 Voice message';
+      case MessageType.location:
+        return '📍 Location';
+      case MessageType.text:
+      default:
+        return msg.text;
+    }
+  }
 
   @override
   void dispose() {
     _ctrl.dispose();
     _scroll.dispose();
-    _recordTimer?.cancel();
     _recorder.dispose();
     super.dispose();
   }
@@ -89,7 +141,9 @@ class _ChatScreenState extends State<ChatScreen> {
     if (text.isEmpty) return;
     final user = context.read<UserProvider>().user;
     if (user == null) return;
+    final replyTo = _replyingTo;
     _ctrl.clear();
+    setState(() => _replyingTo = null);
     try {
       await FirebaseService.instance.sendMessage(GroupMessage(
         id: '',
@@ -99,6 +153,10 @@ class _ChatScreenState extends State<ChatScreen> {
         userPhotoUrl: user.photoUrl,
         text: text,
         createdAt: DateTime.now(),
+        replyToMessageId: replyTo?.id,
+        replyToSenderName: replyTo?.userName,
+        replyToText: replyTo != null ? _replyPreviewFor(replyTo) : null,
+        replyToType: replyTo?.messageType.value,
       ));
       _scrollBottom();
     } catch (e) {
@@ -108,8 +166,9 @@ class _ChatScreenState extends State<ChatScreen> {
 
   void _scrollBottom() {
     WidgetsBinding.instance.addPostFrameCallback((_) {
+      // With reverse:true, offset 0 IS the bottom/newest-message anchor.
       if (_scroll.hasClients) {
-        _scroll.animateTo(_scroll.position.maxScrollExtent,
+        _scroll.animateTo(0,
             duration: const Duration(milliseconds: 250), curve: Curves.easeOut);
       }
     });
@@ -257,19 +316,7 @@ class _ChatScreenState extends State<ChatScreen> {
         '${dir.path}/voice_${DateTime.now().millisecondsSinceEpoch}.m4a';
     await _recorder.start(const RecordConfig(), path: path);
     _recordPath = path;
-    setState(() {
-      _isRecording = true;
-      _recordSeconds = 0;
-    });
-
-    _recordTimer = Timer.periodic(const Duration(seconds: 1), (t) {
-      setState(() => _recordSeconds++);
-      if (_recordSeconds >= 90) {
-        // 1min30s max
-        _stopVoiceRecording(send: true);
-      }
-    });
-
+    setState(() => _isRecording = true);
     if (mounted) _showRecordingSheet();
   }
 
@@ -280,71 +327,24 @@ class _ChatScreenState extends State<ChatScreen> {
       enableDrag: false,
       shape: const RoundedRectangleBorder(
           borderRadius: BorderRadius.vertical(top: Radius.circular(20))),
-      builder: (_) => StatefulBuilder(builder: (ctx, setModal) {
-        // Rebuild every second via the outer timer calling setState + this
-        // sheet re-reading _recordSeconds through the closure.
-        Timer.periodic(const Duration(milliseconds: 300), (t) {
-          if (!_isRecording) {
-            t.cancel();
-            return;
-          }
-          if (ctx.mounted) setModal(() {});
-        });
-        return SafeArea(
-            child: Padding(
-          padding: const EdgeInsets.all(24),
-          child: Column(mainAxisSize: MainAxisSize.min, children: [
-            Container(
-                width: 64,
-                height: 64,
-                decoration: const BoxDecoration(
-                    color: Colors.purple, shape: BoxShape.circle),
-                child: const Icon(Icons.mic, color: Colors.white, size: 32)),
-            const SizedBox(height: 12),
-            Text('${_recordSeconds}s / 90s',
-                style:
-                    const TextStyle(fontSize: 16, fontWeight: FontWeight.w700)),
-            const SizedBox(height: 4),
-            const Text('Recording voice note…',
-                style: TextStyle(fontSize: 12, color: AppTheme.cutMuted)),
-            const SizedBox(height: 20),
-            Row(children: [
-              Expanded(
-                  child: OutlinedButton(
-                onPressed: () {
-                  Navigator.pop(ctx);
-                  _stopVoiceRecording(send: false);
-                },
-                style: OutlinedButton.styleFrom(
-                    foregroundColor: AppTheme.cutRed,
-                    side: const BorderSide(color: AppTheme.cutRed)),
-                child: const Text('Cancel'),
-              )),
-              const SizedBox(width: 10),
-              Expanded(
-                  child: ElevatedButton(
-                onPressed: () {
-                  Navigator.pop(ctx);
-                  _stopVoiceRecording(send: true);
-                },
-                style: ElevatedButton.styleFrom(backgroundColor: Colors.purple),
-                child: const Text('Send'),
-              )),
-            ]),
-          ]),
-        ));
-      }),
+      builder: (_) => _RecordingSheet(
+        maxSeconds: 90,
+        onCancel: (seconds) {
+          Navigator.pop(context);
+          _stopVoiceRecording(send: false, duration: seconds);
+        },
+        onSend: (seconds) {
+          Navigator.pop(context);
+          _stopVoiceRecording(send: true, duration: seconds);
+        },
+      ),
     );
   }
 
-  Future<void> _stopVoiceRecording({required bool send}) async {
-    _recordTimer?.cancel();
+  Future<void> _stopVoiceRecording(
+      {required bool send, required int duration}) async {
     final path = await _recorder.stop();
-    final duration = _recordSeconds;
-    setState(() {
-      _isRecording = false;
-      _recordSeconds = 0;
-    });
+    setState(() => _isRecording = false);
 
     if (!send || path == null) {
       if (path != null) {
@@ -487,7 +487,7 @@ class _ChatScreenState extends State<ChatScreen> {
     final uid = context.watch<UserProvider>().user?.id ?? '';
 
     return StreamBuilder<GroupModel?>(
-      stream: FirebaseService.instance.groupStream(widget.group.id),
+      stream: _groupStream,
       initialData: widget.group,
       builder: (_, groupSnap) {
         final group = groupSnap.data ?? widget.group;
@@ -623,11 +623,11 @@ class _ChatScreenState extends State<ChatScreen> {
                   backgroundColor: AppTheme.cutGrey, color: AppTheme.cutBlue),
             Expanded(
               child: StreamBuilder<List<GroupMessage>>(
-                stream: FirebaseService.instance.messagesStream(group.id),
+                stream: _messagesStream,
                 builder: (_, snap) {
                   if (snap.connectionState == ConnectionState.waiting)
                     return const Center(child: CircularProgressIndicator());
-                  final msgs = snap.data ?? [];
+                  final msgs = (snap.data ?? []).reversed.toList();
                   if (msgs.isEmpty)
                     return const EmptyState(
                         icon: Icons.chat_bubble_outline,
@@ -635,6 +635,7 @@ class _ChatScreenState extends State<ChatScreen> {
                         subtitle: 'Start the conversation.');
                   return ListView.builder(
                     controller: _scroll,
+                    reverse: true,
                     padding: const EdgeInsets.symmetric(
                         horizontal: 12, vertical: 12),
                     itemCount: msgs.length,
@@ -642,33 +643,48 @@ class _ChatScreenState extends State<ChatScreen> {
                       final msg = msgs[i];
                       final mine = msg.userId == uid;
                       final isAdminMsg = msg.userId == group.adminId;
-                      final showDate = i == 0 ||
-                          !_sameDay(msgs[i - 1].createdAt, msg.createdAt);
+                      // In this reversed list, index i+1 is the chronologically
+                      // OLDER neighbour (since index 0 = newest).
+                      final older = i + 1 < msgs.length ? msgs[i + 1] : null;
+                      final showDate = older == null ||
+                          !_sameDay(older.createdAt, msg.createdAt);
                       final showName = !mine &&
-                          (i == 0 ||
-                              msgs[i - 1].userId != msg.userId ||
+                          (older == null ||
+                              older.userId != msg.userId ||
                               msg.createdAt
-                                      .difference(msgs[i - 1].createdAt)
+                                      .difference(older.createdAt)
                                       .inMinutes
                                       .abs() >=
                                   10);
-                      return Column(children: [
-                        if (showDate) _DateSep(msg.createdAt),
-                        _Bubble(
-                            msg: msg,
-                            mine: mine,
-                            showName: showName,
-                            isAdminMsg: isAdminMsg,
-                            onAvatarTap: () => Navigator.of(context).push(
-                                MaterialPageRoute(
-                                    builder: (_) => UserProfileScreen(
-                                        userId: msg.userId)))),
-                      ]);
+                      return Column(
+                        key: ValueKey(msg.id),
+                        children: [
+                          if (showDate) _DateSep(msg.createdAt),
+                          _Bubble(
+                              msg: msg,
+                              mine: mine,
+                              showName: showName,
+                              isAdminMsg: isAdminMsg,
+                              onAvatarTap: () => Navigator.of(context).push(
+                                  MaterialPageRoute(
+                                      builder: (_) => UserProfileScreen(
+                                          userId: msg.userId))),
+                              onReply: () => _startReply(msg)),
+                        ],
+                      );
                     },
                   );
                 },
               ),
             ),
+            if (_replyingTo != null)
+              _ReplyPreviewBar(
+                userName: _replyingTo!.userId == uid
+                    ? 'Yourself'
+                    : _replyingTo!.userName,
+                preview: _replyPreviewFor(_replyingTo!),
+                onCancel: _cancelReply,
+              ),
             _InputBar(
                 ctrl: _ctrl,
                 onSend: _send,
@@ -1074,17 +1090,24 @@ class _Bubble extends StatelessWidget {
   final GroupMessage msg;
   final bool mine, showName, isAdminMsg;
   final VoidCallback onAvatarTap;
+  final VoidCallback onReply;
   const _Bubble(
       {required this.msg,
       required this.mine,
       required this.showName,
       required this.isAdminMsg,
-      required this.onAvatarTap});
+      required this.onAvatarTap,
+      required this.onReply});
 
   @override
   Widget build(BuildContext context) {
     final sc = _colorFor(msg.userId);
-    final bg = mine ? AppTheme.cutBlue : Colors.white;
+    final bg = mine ? _myBubbleColor : Colors.white;
+    final isMedia = (msg.messageType == MessageType.image ||
+            msg.messageType == MessageType.video) &&
+        msg.mediaUrl != null &&
+        msg.mediaUrl!.isNotEmpty;
+
     return Align(
       alignment: mine ? Alignment.centerRight : Alignment.centerLeft,
       child: Row(
@@ -1106,56 +1129,84 @@ class _Bubble extends StatelessWidget {
             ),
             const SizedBox(width: 6),
           ],
-          Container(
-            constraints: BoxConstraints(
-                maxWidth: MediaQuery.of(context).size.width * 0.72),
-            margin: const EdgeInsets.symmetric(vertical: 4),
-            padding: const EdgeInsets.symmetric(horizontal: 13, vertical: 10),
-            decoration: BoxDecoration(
-              color: bg,
-              borderRadius: BorderRadius.only(
-                  topLeft: Radius.circular(mine ? 18 : (showName ? 8 : 18)),
-                  topRight: Radius.circular(mine ? 8 : 18),
-                  bottomLeft: const Radius.circular(18),
-                  bottomRight: const Radius.circular(18)),
-              border: mine ? null : Border.all(color: AppTheme.cutBorder),
-              boxShadow: [
-                BoxShadow(
-                    color: Colors.black.withValues(alpha: 0.05),
-                    blurRadius: 10,
-                    offset: const Offset(0, 4))
-              ],
-            ),
-            child:
-                Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-              if (!mine && showName)
-                Padding(
-                    padding: const EdgeInsets.only(bottom: 3),
-                    child: Row(mainAxisSize: MainAxisSize.min, children: [
-                      Text(msg.userName,
+          if (isMedia)
+            _SwipeToReply(
+              onReply: onReply,
+              child: _MediaBubble(
+                msg: msg,
+                mine: mine,
+                showName: showName,
+                isAdminMsg: isAdminMsg,
+                accentColor: sc,
+                content: _buildContent(context, mine),
+              ),
+            )
+          else
+            _SwipeToReply(
+              onReply: onReply,
+              child: Container(
+                constraints: BoxConstraints(
+                    maxWidth: MediaQuery.of(context).size.width * 0.72),
+                margin: const EdgeInsets.symmetric(vertical: 4),
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 13, vertical: 10),
+                decoration: BoxDecoration(
+                  color: bg,
+                  borderRadius: BorderRadius.only(
+                      topLeft:
+                          Radius.circular(mine ? 18 : (showName ? 8 : 18)),
+                      topRight: Radius.circular(mine ? 8 : 18),
+                      bottomLeft: const Radius.circular(18),
+                      bottomRight: const Radius.circular(18)),
+                  border: Border.all(
+                      color: mine ? _myBubbleBorder : AppTheme.cutBorder),
+                  boxShadow: [
+                    BoxShadow(
+                        color: Colors.black.withValues(alpha: 0.05),
+                        blurRadius: 10,
+                        offset: const Offset(0, 4))
+                  ],
+                ),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    if (!mine && showName)
+                      Padding(
+                          padding: const EdgeInsets.only(bottom: 3),
+                          child:
+                              Row(mainAxisSize: MainAxisSize.min, children: [
+                            Text(msg.userName,
+                                style: TextStyle(
+                                    fontSize: 11,
+                                    fontWeight: FontWeight.w700,
+                                    color: sc.withValues(alpha: 0.8))),
+                            if (isAdminMsg) ...[
+                              const SizedBox(width: 4),
+                              const VerifiedBadge(size: 12)
+                            ],
+                          ])),
+                    if (msg.replyToText != null) _ReplyQuote(msg: msg, mine: mine),
+                    _buildContent(context, mine),
+                    const SizedBox(height: 5),
+                    Row(mainAxisSize: MainAxisSize.min, children: [
+                      TimeAgoText(msg.createdAt,
                           style: TextStyle(
-                              fontSize: 11,
-                              fontWeight: FontWeight.w700,
-                              color: sc.withValues(alpha: 0.8))),
-                      if (isAdminMsg) ...[
+                              fontSize: 10,
+                              color: mine
+                                  ? _myBubbleTextColor.withValues(alpha: 0.7)
+                                  : AppTheme.cutMuted)),
+                      if (mine) ...[
                         const SizedBox(width: 4),
-                        const VerifiedBadge(size: 12)
+                        Icon(Icons.done_all,
+                            size: 13,
+                            color:
+                                _myBubbleTextColor.withValues(alpha: 0.6)),
                       ],
-                    ])),
-              _buildContent(context, mine),
-              const SizedBox(height: 5),
-              Row(mainAxisSize: MainAxisSize.min, children: [
-                TimeAgoText(msg.createdAt,
-                    style: TextStyle(
-                        fontSize: 10,
-                        color: mine ? Colors.white70 : AppTheme.cutMuted)),
-                if (mine) ...[
-                  const SizedBox(width: 4),
-                  const Icon(Icons.done_all, size: 13, color: Colors.white70),
-                ],
-              ]),
-            ]),
-          ),
+                    ]),
+                  ],
+                ),
+              ),
+            ),
           if (mine) const SizedBox(width: 4),
         ],
       ),
@@ -1178,12 +1229,482 @@ class _Bubble extends StatelessWidget {
             style: TextStyle(
                 fontSize: 13,
                 height: 1.4,
-                color: mine ? Colors.white : AppTheme.cutDark));
+                color: mine ? _myBubbleTextColor : AppTheme.cutDark));
     }
   }
 }
 
-// ── Image bubble — FIX: tap opens fullscreen viewer ────────────────
+// ─── Swipe-left-to-reply gesture wrapper ───────────────────────────
+class _SwipeToReply extends StatefulWidget {
+  final Widget child;
+  final VoidCallback onReply;
+  const _SwipeToReply({required this.child, required this.onReply});
+
+  @override
+  State<_SwipeToReply> createState() => _SwipeToReplyState();
+}
+
+class _SwipeToReplyState extends State<_SwipeToReply> {
+  double _dragX = 0; // positive values only (swiping right)
+  static const double _maxDrag = 64;
+  static const double _triggerDrag = 44;
+  bool _triggered = false;
+
+  void _onDragUpdate(DragUpdateDetails d) {
+    setState(() {
+      _dragX = (_dragX + d.delta.dx).clamp(0.0, _maxDrag);
+      _triggered = _dragX >= _triggerDrag;
+    });
+  }
+
+  void _onDragEnd(DragEndDetails d) {
+    if (_triggered) widget.onReply();
+    setState(() {
+      _dragX = 0;
+      _triggered = false;
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      onHorizontalDragUpdate: _onDragUpdate,
+      onHorizontalDragEnd: _onDragEnd,
+      child: Stack(clipBehavior: Clip.none, children: [
+        if (_dragX > 4)
+          Positioned(
+            left: -28,
+            top: 0,
+            bottom: 0,
+            child: Center(
+              child: Opacity(
+                opacity: (_dragX / _triggerDrag).clamp(0, 1),
+                child: Icon(Icons.reply,
+                    color: _triggered ? AppTheme.cutBlue : AppTheme.cutMuted,
+                    size: 20),
+              ),
+            ),
+          ),
+        AnimatedContainer(
+          duration: _dragX == 0
+              ? const Duration(milliseconds: 180)
+              : Duration.zero,
+          curve: Curves.easeOut,
+          transform: Matrix4.translationValues(_dragX, 0, 0),
+          child: widget.child,
+        ),
+      ]),
+    );
+  }
+}
+
+// ─── Cached, fully-controlled video player ─────────────────────────
+// Downloads the video once via the shared cache manager, then plays from
+// the local file. Subsequent opens of the same video are instant — no
+// re-download — matching WhatsApp-style local media persistence.
+class _CachedVideoPlayerScreen extends StatefulWidget {
+  final String url;
+  const _CachedVideoPlayerScreen({required this.url});
+
+  @override
+  State<_CachedVideoPlayerScreen> createState() =>
+      _CachedVideoPlayerScreenState();
+}
+
+class _CachedVideoPlayerScreenState extends State<_CachedVideoPlayerScreen> {
+  VideoPlayerController? _controller;
+  bool _loading = true;
+  bool _error = false;
+  bool _controlsVisible = true;
+  bool _muted = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _load();
+  }
+
+  Future<void> _load() async {
+    try {
+      final file = await chatMediaCacheManager.getSingleFile(widget.url);
+      final controller = VideoPlayerController.file(file);
+      await controller.initialize();
+      controller.addListener(() {
+        if (mounted) setState(() {});
+      });
+      if (!mounted) return;
+      setState(() {
+        _controller = controller;
+        _loading = false;
+      });
+      controller.play();
+    } catch (_) {
+      if (mounted) setState(() {
+        _loading = false;
+        _error = true;
+      });
+    }
+  }
+
+  @override
+  void dispose() {
+    _controller?.dispose();
+    super.dispose();
+  }
+
+  void _togglePlay() {
+    final c = _controller;
+    if (c == null) return;
+    setState(() => c.value.isPlaying ? c.pause() : c.play());
+  }
+
+  void _toggleMute() {
+    final c = _controller;
+    if (c == null) return;
+    setState(() {
+      _muted = !_muted;
+      c.setVolume(_muted ? 0 : 1);
+    });
+  }
+
+  String _fmt(Duration d) {
+    final m = d.inMinutes.remainder(60).toString().padLeft(2, '0');
+    final s = d.inSeconds.remainder(60).toString().padLeft(2, '0');
+    return '$m:$s';
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final c = _controller;
+    return Scaffold(
+      backgroundColor: Colors.black,
+      body: SafeArea(
+        child: GestureDetector(
+          onTap: () => setState(() => _controlsVisible = !_controlsVisible),
+          child: Stack(children: [
+            Center(
+              child: _loading
+                  ? const CircularProgressIndicator(color: Colors.white)
+                  : _error || c == null
+                      ? const Column(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Icon(Icons.error_outline,
+                                color: Colors.white54, size: 40),
+                            SizedBox(height: 8),
+                            Text('Could not load video',
+                                style: TextStyle(color: Colors.white70)),
+                          ],
+                        )
+                      : AspectRatio(
+                          aspectRatio: c.value.aspectRatio,
+                          child: VideoPlayer(c),
+                        ),
+            ),
+            if (_controlsVisible)
+              Positioned(
+                top: 4,
+                left: 4,
+                child: IconButton(
+                  icon: const Icon(Icons.close, color: Colors.white, size: 28),
+                  onPressed: () => Navigator.pop(context),
+                ),
+              ),
+            if (_controlsVisible && c != null && !_loading && !_error)
+              Positioned(
+                left: 0,
+                right: 0,
+                bottom: 0,
+                child: Container(
+                  padding: const EdgeInsets.fromLTRB(16, 24, 16, 16),
+                  decoration: BoxDecoration(
+                    gradient: LinearGradient(
+                      begin: Alignment.topCenter,
+                      end: Alignment.bottomCenter,
+                      colors: [
+                        Colors.black.withValues(alpha: 0),
+                        Colors.black.withValues(alpha: 0.7),
+                      ],
+                    ),
+                  ),
+                  child: Column(mainAxisSize: MainAxisSize.min, children: [
+                    Row(children: [
+                      Text(_fmt(c.value.position),
+                          style: const TextStyle(
+                              color: Colors.white, fontSize: 12)),
+                      Expanded(
+                        child: SliderTheme(
+                          data: SliderTheme.of(context).copyWith(
+                            trackHeight: 3,
+                            thumbShape: const RoundSliderThumbShape(
+                                enabledThumbRadius: 6),
+                            overlayShape: const RoundSliderOverlayShape(
+                                overlayRadius: 14),
+                          ),
+                          child: Slider(
+                            value: c.value.position.inMilliseconds
+                                .clamp(0, c.value.duration.inMilliseconds)
+                                .toDouble(),
+                            min: 0,
+                            max: c.value.duration.inMilliseconds.toDouble().clamp(
+                                1, double.infinity),
+                            activeColor: Colors.white,
+                            inactiveColor: Colors.white24,
+                            onChanged: (v) => c.seekTo(
+                                Duration(milliseconds: v.round())),
+                          ),
+                        ),
+                      ),
+                      Text(_fmt(c.value.duration),
+                          style: const TextStyle(
+                              color: Colors.white, fontSize: 12)),
+                    ]),
+                    Row(mainAxisAlignment: MainAxisAlignment.center, children: [
+                      IconButton(
+                        icon: Icon(
+                            _muted ? Icons.volume_off : Icons.volume_up,
+                            color: Colors.white),
+                        onPressed: _toggleMute,
+                      ),
+                      const SizedBox(width: 12),
+                      GestureDetector(
+                        onTap: _togglePlay,
+                        child: Container(
+                          width: 56,
+                          height: 56,
+                          decoration: const BoxDecoration(
+                              color: Colors.white24, shape: BoxShape.circle),
+                          child: Icon(
+                              c.value.isPlaying
+                                  ? Icons.pause
+                                  : Icons.play_arrow,
+                              color: Colors.white,
+                              size: 32),
+                        ),
+                      ),
+                      const SizedBox(width: 48),
+                    ]),
+                  ]),
+                ),
+              ),
+          ]),
+        ),
+      ),
+    );
+  }
+}
+
+
+class _RecordingSheet extends StatefulWidget {
+  final int maxSeconds;
+  final ValueChanged<int> onCancel;
+  final ValueChanged<int> onSend;
+  const _RecordingSheet(
+      {required this.maxSeconds, required this.onCancel, required this.onSend});
+
+  @override
+  State<_RecordingSheet> createState() => _RecordingSheetState();
+}
+
+class _RecordingSheetState extends State<_RecordingSheet> {
+  int _seconds = 0;
+  Timer? _timer;
+  bool _autoSent = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _timer = Timer.periodic(const Duration(seconds: 1), (t) {
+      if (!mounted) return;
+      setState(() => _seconds++);
+      if (_seconds >= widget.maxSeconds && !_autoSent) {
+        _autoSent = true;
+        t.cancel();
+        widget.onSend(_seconds);
+      }
+    });
+  }
+
+  @override
+  void dispose() {
+    _timer?.cancel();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final progress = _seconds / widget.maxSeconds;
+    return SafeArea(
+      child: Padding(
+        padding: const EdgeInsets.all(24),
+        child: Column(mainAxisSize: MainAxisSize.min, children: [
+          Stack(alignment: Alignment.center, children: [
+            SizedBox(
+              width: 72,
+              height: 72,
+              child: CircularProgressIndicator(
+                value: progress.clamp(0, 1),
+                strokeWidth: 3,
+                backgroundColor: Colors.purple.withValues(alpha: 0.15),
+                valueColor: const AlwaysStoppedAnimation(Colors.purple),
+              ),
+            ),
+            Container(
+                width: 56,
+                height: 56,
+                decoration: const BoxDecoration(
+                    color: Colors.purple, shape: BoxShape.circle),
+                child: const Icon(Icons.mic, color: Colors.white, size: 26)),
+          ]),
+          const SizedBox(height: 14),
+          Text('${_seconds}s / ${widget.maxSeconds}s',
+              style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w700)),
+          const SizedBox(height: 4),
+          const Text('Recording voice note…',
+              style: TextStyle(fontSize: 12, color: AppTheme.cutMuted)),
+          const SizedBox(height: 20),
+          Row(children: [
+            Expanded(
+                child: OutlinedButton(
+              onPressed: () => widget.onCancel(_seconds),
+              style: OutlinedButton.styleFrom(
+                  foregroundColor: AppTheme.cutRed,
+                  side: const BorderSide(color: AppTheme.cutRed)),
+              child: const Text('Cancel'),
+            )),
+            const SizedBox(width: 10),
+            Expanded(
+                child: ElevatedButton(
+              onPressed: () => widget.onSend(_seconds),
+              style: ElevatedButton.styleFrom(backgroundColor: Colors.purple),
+              child: const Text('Send'),
+            )),
+          ]),
+        ]),
+      ),
+    );
+  }
+}
+
+// ─── Modern media bubble (image/video) — thin border, no padding box ──
+class _MediaBubble extends StatelessWidget {
+  final GroupMessage msg;
+  final bool mine, showName, isAdminMsg;
+  final Color accentColor;
+  final Widget content;
+  const _MediaBubble({
+    required this.msg,
+    required this.mine,
+    required this.showName,
+    required this.isAdminMsg,
+    required this.accentColor,
+    required this.content,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final radius = BorderRadius.only(
+      topLeft: Radius.circular(mine ? 18 : (showName ? 8 : 18)),
+      topRight: Radius.circular(mine ? 8 : 18),
+      bottomLeft: const Radius.circular(18),
+      bottomRight: const Radius.circular(18),
+    );
+    return Container(
+      constraints: BoxConstraints(
+          maxWidth: MediaQuery.of(context).size.width * 0.62),
+      margin: const EdgeInsets.symmetric(vertical: 4),
+      child: ClipRRect(
+        borderRadius: radius,
+        child: Container(
+          decoration: BoxDecoration(
+            borderRadius: radius,
+            border: Border.all(
+                color: AppTheme.cutBorder.withValues(alpha: 0.8), width: 1),
+          ),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              if (msg.replyToText != null)
+                _ReplyQuote(msg: msg, mine: mine, dense: true),
+              Stack(children: [
+                content,
+                // Sender name chip (group chats only)
+                if (!mine && showName)
+                  Positioned(
+                    left: 8,
+                    top: 8,
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 8, vertical: 4),
+                      decoration: BoxDecoration(
+                        color: Colors.black.withValues(alpha: 0.45),
+                        borderRadius: BorderRadius.circular(20),
+                      ),
+                      child: Row(mainAxisSize: MainAxisSize.min, children: [
+                        Text(msg.userName,
+                            style: TextStyle(
+                                fontSize: 11,
+                                fontWeight: FontWeight.w700,
+                                color: accentColor.withValues(alpha: 1),
+                                shadows: const [
+                                  Shadow(color: Colors.black, blurRadius: 2)
+                                ])),
+                        if (isAdminMsg) ...[
+                          const SizedBox(width: 4),
+                          const VerifiedBadge(size: 11)
+                        ],
+                      ]),
+                    ),
+                  ),
+            // Timestamp + read receipt, bottom-right, on a soft gradient scrim
+            Positioned(
+              left: 0,
+              right: 0,
+              bottom: 0,
+              child: Container(
+                padding: const EdgeInsets.fromLTRB(10, 20, 8, 6),
+                decoration: BoxDecoration(
+                  borderRadius: BorderRadius.only(
+                      bottomLeft: radius.bottomLeft,
+                      bottomRight: radius.bottomRight),
+                  gradient: LinearGradient(
+                    begin: Alignment.topCenter,
+                    end: Alignment.bottomCenter,
+                    colors: [
+                      Colors.black.withValues(alpha: 0),
+                      Colors.black.withValues(alpha: 0.45),
+                    ],
+                  ),
+                ),
+                child: Row(
+                  mainAxisAlignment: MainAxisAlignment.end,
+                  mainAxisSize: MainAxisSize.max,
+                  children: [
+                    TimeAgoText(msg.createdAt,
+                        style: const TextStyle(
+                            fontSize: 10,
+                            color: Colors.white,
+                            fontWeight: FontWeight.w600)),
+                    if (mine) ...[
+                      const SizedBox(width: 4),
+                      const Icon(Icons.done_all,
+                          size: 13, color: Colors.white),
+                    ],
+                  ],
+                ),
+              ),
+            ),
+          ]),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+
 class _ImageContent extends StatelessWidget {
   final GroupMessage msg;
   final bool mine;
@@ -1196,33 +1717,33 @@ class _ImageContent extends StatelessWidget {
             width: 16,
             height: 16,
             child: CircularProgressIndicator(
-                strokeWidth: 2, color: mine ? Colors.white : AppTheme.cutBlue)),
+                strokeWidth: 2, color: mine ? _myBubbleTextColor : AppTheme.cutBlue)),
         const SizedBox(width: 8),
         Text('Uploading…',
             style: TextStyle(
                 fontSize: 12,
-                color: mine ? Colors.white70 : AppTheme.cutMuted)),
+                color: mine ? _myBubbleTextColor.withValues(alpha: 0.7) : AppTheme.cutMuted)),
       ]);
     }
     return GestureDetector(
       onTap: () => FullscreenImageViewer.show(context, msg.mediaUrl!),
-      child: ClipRRect(
-          borderRadius: BorderRadius.circular(10),
-          child: CachedNetworkImage(
-              imageUrl: msg.mediaUrl!,
-              width: 200,
-              height: 200,
-              fit: BoxFit.cover,
-              placeholder: (_, __) => Container(
-                  width: 200,
-                  height: 200,
-                  color: Colors.grey.shade200,
-                  child: const Center(child: CircularProgressIndicator())),
-              errorWidget: (_, __, ___) => Container(
-                  width: 200,
-                  height: 120,
-                  color: Colors.grey.shade200,
-                  child: const Icon(Icons.broken_image_outlined)))),
+      child: CachedNetworkImage(
+        imageUrl: msg.mediaUrl!,
+        cacheManager: chatMediaCacheManager,
+        width: double.infinity,
+        height: 230,
+        fit: BoxFit.cover,
+        placeholder: (_, __) => Container(
+            width: double.infinity,
+            height: 230,
+            color: Colors.grey.shade200,
+            child: const Center(child: CircularProgressIndicator())),
+        errorWidget: (_, __, ___) => Container(
+            width: double.infinity,
+            height: 160,
+            color: Colors.grey.shade200,
+            child: const Icon(Icons.broken_image_outlined)),
+      ),
     );
   }
 }
@@ -1240,29 +1761,32 @@ class _VideoContent extends StatelessWidget {
             width: 16,
             height: 16,
             child: CircularProgressIndicator(
-                strokeWidth: 2, color: mine ? Colors.white : AppTheme.cutBlue)),
+                strokeWidth: 2, color: mine ? _myBubbleTextColor : AppTheme.cutBlue)),
         const SizedBox(width: 8),
         Text('Uploading video…',
             style: TextStyle(
                 fontSize: 12,
-                color: mine ? Colors.white70 : AppTheme.cutMuted)),
+                color: mine ? _myBubbleTextColor.withValues(alpha: 0.7) : AppTheme.cutMuted)),
       ]);
     }
     return GestureDetector(
-      onTap: () => FullscreenVideoViewer.show(context, msg.mediaUrl!),
+      onTap: () => Navigator.of(context).push(MaterialPageRoute(
+          builder: (_) => _CachedVideoPlayerScreen(url: msg.mediaUrl!))),
       child: Container(
-          width: 200,
-          height: 120,
-          decoration: BoxDecoration(
-              color: Colors.black, borderRadius: BorderRadius.circular(10)),
+          width: double.infinity,
+          height: 230,
+          color: Colors.black,
           child: Stack(alignment: Alignment.center, children: [
             Container(
-                width: 48,
-                height: 48,
-                decoration: const BoxDecoration(
-                    color: Colors.black54, shape: BoxShape.circle),
+                width: 52,
+                height: 52,
+                decoration: BoxDecoration(
+                  color: Colors.black.withValues(alpha: 0.4),
+                  shape: BoxShape.circle,
+                  border: Border.all(color: Colors.white, width: 1.5),
+                ),
                 child: const Icon(Icons.play_arrow,
-                    color: Colors.white, size: 32)),
+                    color: Colors.white, size: 30)),
           ])),
     );
   }
@@ -1376,12 +1900,12 @@ class _VoiceContentState extends State<_VoiceContent> {
             width: 16,
             height: 16,
             child: CircularProgressIndicator(
-                strokeWidth: 2, color: mine ? Colors.white : AppTheme.cutBlue)),
+                strokeWidth: 2, color: mine ? _myBubbleTextColor : AppTheme.cutBlue)),
         const SizedBox(width: 8),
         Text('Uploading voice note…',
             style: TextStyle(
                 fontSize: 12,
-                color: mine ? Colors.white70 : AppTheme.cutMuted)),
+                color: mine ? _myBubbleTextColor.withValues(alpha: 0.7) : AppTheme.cutMuted)),
       ]);
     }
     final duration = _duration.inMilliseconds > 0
@@ -1404,13 +1928,13 @@ class _VoiceContentState extends State<_VoiceContent> {
                   height: 30,
                   child: CircularProgressIndicator(
                       strokeWidth: 2.2,
-                      color: mine ? Colors.white : AppTheme.cutBlue),
+                      color: mine ? _myBubbleTextColor : AppTheme.cutBlue),
                 )
               : Icon(
                   _player.playing
                       ? Icons.pause_circle_filled
                       : Icons.play_circle_fill,
-                  color: mine ? Colors.white : AppTheme.cutBlue,
+                  color: mine ? _myBubbleTextColor : AppTheme.cutBlue,
                   size: 30),
         ),
         const SizedBox(width: 8),
@@ -1426,8 +1950,8 @@ class _VoiceContentState extends State<_VoiceContent> {
               value: progress,
               min: 0,
               max: 1,
-              activeColor: mine ? Colors.white : AppTheme.cutBlue,
-              inactiveColor: (mine ? Colors.white : AppTheme.cutBlue)
+              activeColor: mine ? _myBubbleTextColor : AppTheme.cutBlue,
+              inactiveColor: (mine ? _myBubbleTextColor : AppTheme.cutBlue)
                   .withValues(alpha: 0.25),
               onChanged: duration.inMilliseconds == 0
                   ? null
@@ -1440,7 +1964,7 @@ class _VoiceContentState extends State<_VoiceContent> {
         Text(_formatDuration(duration),
             style: TextStyle(
                 fontSize: 11,
-                color: mine ? Colors.white70 : AppTheme.cutMuted)),
+                color: mine ? _myBubbleTextColor.withValues(alpha: 0.7) : AppTheme.cutMuted)),
       ]),
     );
   }
@@ -1474,33 +1998,74 @@ class _LocationContent extends StatelessWidget {
           color: expired
               ? Colors.grey.shade200
               : (mine
-                  ? Colors.white.withValues(alpha: 0.15)
-                  : Colors.teal.withValues(alpha: 0.1)),
-          borderRadius: BorderRadius.circular(14),
+                  ? _myBubbleBorder.withValues(alpha: 0.3)
+                  : Colors.teal.withValues(alpha: 0.08)),
+          borderRadius: BorderRadius.circular(16),
           border:
-              Border.all(color: expired ? Colors.grey.shade400 : Colors.teal),
+              Border.all(color: expired ? Colors.grey.shade400 : Colors.teal.withValues(alpha: 0.4)),
+          boxShadow: [
+            BoxShadow(
+              color: Colors.black.withValues(alpha: 0.04),
+              blurRadius: 6,
+              offset: const Offset(0, 2),
+            ),
+          ],
         ),
         child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
           if (!expired && hasCoords) ...[
-            ClipRRect(
-              borderRadius: BorderRadius.circular(10),
-              child: CachedNetworkImage(
-                imageUrl: _staticMapUrl(width: 460, height: 180),
-                width: double.infinity,
-                height: 88,
-                fit: BoxFit.cover,
-                placeholder: (_, __) => Container(
-                  height: 88,
-                  color: Colors.teal.withValues(alpha: 0.12),
-                  child: const Center(
-                      child: CircularProgressIndicator(strokeWidth: 2)),
+            Stack(
+              children: [
+                ClipRRect(
+                  borderRadius: BorderRadius.circular(12),
+                  child: SizedBox(
+                    height: 100,
+                    width: double.infinity,
+                    child: IgnorePointer(
+                      child: GoogleMap(
+                        initialCameraPosition: CameraPosition(
+                          target: LatLng(msg.locationLat!, msg.locationLng!),
+                          zoom: 15.5,
+                        ),
+                        markers: {
+                          Marker(
+                            markerId: const MarkerId('preview'),
+                            position: LatLng(msg.locationLat!, msg.locationLng!),
+                          ),
+                        },
+                        liteModeEnabled: true,
+                        zoomControlsEnabled: false,
+                        zoomGesturesEnabled: false,
+                        scrollGesturesEnabled: false,
+                        rotateGesturesEnabled: false,
+                        tiltGesturesEnabled: false,
+                        myLocationButtonEnabled: false,
+                        mapToolbarEnabled: false,
+                        compassEnabled: false,
+                      ),
+                    ),
+                  ),
                 ),
-                errorWidget: (_, __, ___) => Container(
-                  height: 88,
-                  color: Colors.teal.withValues(alpha: 0.12),
-                  child: const Icon(Icons.map_outlined, color: Colors.teal),
+                Positioned(
+                  right: 6,
+                  bottom: 6,
+                  child: Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                    decoration: BoxDecoration(
+                      color: Colors.black.withValues(alpha: 0.55),
+                      borderRadius: BorderRadius.circular(20),
+                    ),
+                    child: const Row(mainAxisSize: MainAxisSize.min, children: [
+                      Icon(Icons.touch_app_outlined, color: Colors.white, size: 12),
+                      SizedBox(width: 4),
+                      Text('Tap to explore',
+                          style: TextStyle(
+                              fontSize: 10,
+                              color: Colors.white,
+                              fontWeight: FontWeight.w600)),
+                    ]),
+                  ),
                 ),
-              ),
+              ],
             ),
             const SizedBox(height: 8),
           ],
@@ -1521,19 +2086,19 @@ class _LocationContent extends StatelessWidget {
                           fontWeight: FontWeight.w700,
                           color: expired
                               ? Colors.grey
-                              : (mine ? Colors.white : AppTheme.cutDark)),
+                              : (mine ? _myBubbleTextColor : AppTheme.cutDark)),
                       maxLines: 2,
                       overflow: TextOverflow.ellipsis),
                   if (!expired && coords.isNotEmpty)
                     Text(coords,
                         style: TextStyle(
                             fontSize: 10,
-                            color: mine ? Colors.white70 : AppTheme.cutMuted)),
+                            color: mine ? _myBubbleTextColor.withValues(alpha: 0.7) : AppTheme.cutMuted)),
                   if (!expired && msg.locationExpiresAt != null)
                     Text('Expires ${_timeLeft(msg.locationExpiresAt!)}',
                         style: TextStyle(
                             fontSize: 10,
-                            color: mine ? Colors.white60 : AppTheme.cutMuted)),
+                            color: mine ? _myBubbleTextColor.withValues(alpha: 0.6) : AppTheme.cutMuted)),
                 ])),
           ]),
           if (!expired && hasCoords) ...[
@@ -1545,7 +2110,7 @@ class _LocationContent extends StatelessWidget {
                 icon: const Icon(Icons.open_in_new, size: 14),
                 label: const Text('Open in Maps'),
                 style: TextButton.styleFrom(
-                  foregroundColor: mine ? Colors.white : Colors.teal,
+                  foregroundColor: mine ? _myBubbleTextColor : Colors.teal,
                   textStyle: const TextStyle(
                       fontSize: 11, fontWeight: FontWeight.w700),
                   padding:
@@ -1561,11 +2126,6 @@ class _LocationContent extends StatelessWidget {
     );
   }
 
-  String _staticMapUrl({required int width, required int height}) =>
-      'https://maps.googleapis.com/maps/api/staticmap?center=${msg.locationLat},${msg.locationLng}'
-      '&zoom=15&size=${width}x$height&markers=color:red|${msg.locationLat},${msg.locationLng}'
-      '&key=$_mapsApiKey';
-
   String _timeLeft(DateTime expires) {
     final diff = expires.difference(DateTime.now());
     if (diff.inHours >= 1) return 'in ${diff.inHours}h';
@@ -1578,64 +2138,93 @@ class _LocationContent extends StatelessWidget {
     showDialog(
         context: context,
         builder: (_) => Dialog(
+              insetPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 40),
               shape: RoundedRectangleBorder(
-                  borderRadius: BorderRadius.circular(16)),
+                  borderRadius: BorderRadius.circular(20)),
               child: Padding(
                   padding: const EdgeInsets.all(16),
                   child: Column(mainAxisSize: MainAxisSize.min, children: [
                     Row(children: [
-                      const Icon(Icons.location_on, color: Colors.teal),
-                      const SizedBox(width: 8),
+                      Container(
+                        padding: const EdgeInsets.all(6),
+                        decoration: BoxDecoration(
+                          color: Colors.teal.withValues(alpha: 0.12),
+                          shape: BoxShape.circle,
+                        ),
+                        child: const Icon(Icons.location_on, color: Colors.teal, size: 20),
+                      ),
+                      const SizedBox(width: 10),
                       Expanded(
                           child: Text(msg.locationAddress ?? 'Live Location',
                               style: const TextStyle(
-                                  fontSize: 15, fontWeight: FontWeight.w600)))
+                                  fontSize: 15, fontWeight: FontWeight.w700))),
+                      IconButton(
+                        onPressed: () => Navigator.pop(context),
+                        icon: const Icon(Icons.close, size: 20),
+                        padding: EdgeInsets.zero,
+                        constraints: const BoxConstraints(minWidth: 32, minHeight: 32),
+                      ),
                     ]),
-                    const SizedBox(height: 8),
-                    if (msg.locationExpiresAt != null)
-                      Text(
-                          'Expires at ${msg.locationExpiresAt!.hour.toString().padLeft(2, '0')}:${msg.locationExpiresAt!.minute.toString().padLeft(2, '0')}',
-                          style: const TextStyle(
-                              fontSize: 12, color: AppTheme.cutMuted)),
-                    const SizedBox(height: 12),
-                    Container(
-                      height: 200,
-                      width: double.infinity,
-                      decoration: BoxDecoration(
-                          color: AppTheme.cutGrey,
-                          borderRadius: BorderRadius.circular(10)),
-                      child: ClipRRect(
-                          borderRadius: BorderRadius.circular(10),
-                          child: CachedNetworkImage(
-                            imageUrl: _staticMapUrl(width: 400, height: 200),
-                            fit: BoxFit.cover,
-                            placeholder: (_, __) => const Center(
-                                child: CircularProgressIndicator()),
-                            errorWidget: (_, __, ___) => Center(
-                                child: Column(
-                                    mainAxisAlignment: MainAxisAlignment.center,
-                                    children: [
-                                  const Icon(Icons.map_outlined,
-                                      size: 36, color: AppTheme.cutMuted),
-                                  const SizedBox(height: 8),
-                                  Text(
-                                      '${msg.locationLat!.toStringAsFixed(5)}, ${msg.locationLng!.toStringAsFixed(5)}',
-                                      style: const TextStyle(
-                                          fontSize: 12,
-                                          color: AppTheme.cutMuted)),
-                                ])),
-                          )),
+                    if (msg.locationExpiresAt != null) ...[
+                      const SizedBox(height: 4),
+                      Padding(
+                        padding: const EdgeInsets.only(left: 42),
+                        child: Text(
+                            'Expires at ${msg.locationExpiresAt!.hour.toString().padLeft(2, '0')}:${msg.locationExpiresAt!.minute.toString().padLeft(2, '0')}',
+                            style: const TextStyle(
+                                fontSize: 12, color: AppTheme.cutMuted)),
+                      ),
+                    ],
+                    const SizedBox(height: 14),
+                    ClipRRect(
+                      borderRadius: BorderRadius.circular(14),
+                      child: SizedBox(
+                        height: 340,
+                        width: double.infinity,
+                        child: GoogleMap(
+                          initialCameraPosition: CameraPosition(
+                            target: LatLng(msg.locationLat!, msg.locationLng!),
+                            zoom: 16,
+                          ),
+                          markers: {
+                            Marker(
+                              markerId: const MarkerId('shared_location'),
+                              position: LatLng(msg.locationLat!, msg.locationLng!),
+                              infoWindow: InfoWindow(
+                                  title: msg.locationAddress ?? 'Shared location'),
+                            ),
+                          },
+                          zoomControlsEnabled: true,
+                          zoomGesturesEnabled: true,
+                          scrollGesturesEnabled: true,
+                          rotateGesturesEnabled: true,
+                          tiltGesturesEnabled: true,
+                          myLocationButtonEnabled: false,
+                          mapToolbarEnabled: false,
+                        ),
+                      ),
                     ),
-                    const SizedBox(height: 12),
+                    const SizedBox(height: 6),
+                    Padding(
+                      padding: const EdgeInsets.symmetric(vertical: 6),
+                      child: Text(
+                          '${msg.locationLat!.toStringAsFixed(5)}, ${msg.locationLng!.toStringAsFixed(5)}',
+                          style: const TextStyle(
+                              fontSize: 11, color: AppTheme.cutMuted)),
+                    ),
                     SizedBox(
                         width: double.infinity,
                         child: ElevatedButton.icon(
                             onPressed: _openMaps,
-                            icon: const Icon(Icons.open_in_new),
-                            label: const Text('Open in Maps'))),
-                    TextButton(
-                        onPressed: () => Navigator.pop(context),
-                        child: const Text('Close')),
+                            icon: const Icon(Icons.open_in_new, size: 18),
+                            label: const Text('Open in Google Maps app'),
+                            style: ElevatedButton.styleFrom(
+                              backgroundColor: Colors.teal,
+                              foregroundColor: Colors.white,
+                              padding: const EdgeInsets.symmetric(vertical: 12),
+                              shape: RoundedRectangleBorder(
+                                  borderRadius: BorderRadius.circular(12)),
+                            ))),
                   ])),
             ));
   }
@@ -1700,6 +2289,99 @@ class _AttachBtn extends StatelessWidget {
         const SizedBox(height: 6),
         Text(label, style: const TextStyle(fontSize: 11)),
       ]));
+}
+
+// ─── Quoted-reply snippet — shown inside a bubble that is a reply ─────
+class _ReplyQuote extends StatelessWidget {
+  final GroupMessage msg;
+  final bool mine;
+  final bool dense;
+  const _ReplyQuote({required this.msg, required this.mine, this.dense = false});
+
+  @override
+  Widget build(BuildContext context) {
+    final bg = dense
+        ? Colors.black.withValues(alpha: 0.35)
+        : (mine
+            ? _myBubbleBorder.withValues(alpha: 0.4)
+            : AppTheme.cutGrey);
+    final textColor = dense
+        ? Colors.white
+        : (mine ? _myBubbleTextColor : AppTheme.cutDark);
+    return Container(
+      margin: const EdgeInsets.only(bottom: 6),
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+      decoration: BoxDecoration(
+        color: bg,
+        borderRadius: BorderRadius.circular(8),
+        border: Border(
+            left: BorderSide(
+                color: dense ? Colors.white70 : AppTheme.cutBlue, width: 3)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Text(msg.replyToSenderName ?? 'Message',
+              style: TextStyle(
+                  fontSize: 11,
+                  fontWeight: FontWeight.w700,
+                  color: dense ? Colors.white : AppTheme.cutBlue)),
+          Text(msg.replyToText ?? '',
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: TextStyle(
+                  fontSize: 11,
+                  color: textColor.withValues(alpha: 0.85))),
+        ],
+      ),
+    );
+  }
+}
+
+
+class _ReplyPreviewBar extends StatelessWidget {
+  final String userName;
+  final String preview;
+  final VoidCallback onCancel;
+  const _ReplyPreviewBar(
+      {required this.userName, required this.preview, required this.onCancel});
+
+  @override
+  Widget build(BuildContext context) => Container(
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+        decoration: const BoxDecoration(
+            color: Color(0xFFF0F7FF),
+            border: Border(top: BorderSide(color: AppTheme.cutBorder))),
+        child: Row(children: [
+          Container(width: 3, height: 34, color: AppTheme.cutBlue),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text('Replying to $userName',
+                    style: const TextStyle(
+                        fontSize: 12,
+                        fontWeight: FontWeight.w700,
+                        color: AppTheme.cutBlue)),
+                Text(preview,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(
+                        fontSize: 12, color: AppTheme.cutMuted)),
+              ],
+            ),
+          ),
+          IconButton(
+            icon: const Icon(Icons.close, size: 18, color: AppTheme.cutMuted),
+            onPressed: onCancel,
+            padding: EdgeInsets.zero,
+            constraints: const BoxConstraints(minWidth: 32, minHeight: 32),
+          ),
+        ]),
+      );
 }
 
 class _InputBar extends StatelessWidget {
