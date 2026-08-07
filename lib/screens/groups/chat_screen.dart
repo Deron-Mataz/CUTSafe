@@ -112,6 +112,11 @@ class _ChatScreenState extends State<ChatScreen> {
   // message for this group (see _maybeCaptureUnreadDivider).
   int? _unseenCountAtOpen;
   bool _dividerDismissed = false;
+  // Becomes true the first time the user scrolls away from the newest
+  // message. The divider should NOT dismiss just because index 0 is
+  // trivially visible on initial open (the chat always opens at the
+  // bottom) — only once the user has actually scrolled up and back down.
+  bool _hasScrolledAwayFromBottom = false;
 
   @override
   void initState() {
@@ -132,9 +137,14 @@ class _ChatScreenState extends State<ChatScreen> {
     if (shouldShow != _showJumpToBottom) {
       setState(() => _showJumpToBottom = shouldShow);
     }
-    // Dismiss the "new messages" divider once the user scrolls back down
-    // to the newest message.
-    if (minIndex == 0 && !_dividerDismissed && _unseenCountAtOpen != null) {
+    if (minIndex > 0) _hasScrolledAwayFromBottom = true;
+    // Dismiss the "new messages" divider only once the user has scrolled
+    // UP away from the newest message and THEN scrolled back down to it —
+    // not simply because the chat opened already anchored at the bottom.
+    if (minIndex == 0 &&
+        _hasScrolledAwayFromBottom &&
+        !_dividerDismissed &&
+        _unseenCountAtOpen != null) {
       setState(() => _dividerDismissed = true);
     }
   }
@@ -459,21 +469,23 @@ class _ChatScreenState extends State<ChatScreen> {
 
   // ── Voice note recording (tap-and-hold, swipe up to lock) ─────
   void _openVoiceRecordSheet() {
-    showModalBottomSheet(
+    showDialog(
       context: context,
-      isDismissible: false,
-      enableDrag: false,
-      shape: const RoundedRectangleBorder(
-          borderRadius: BorderRadius.vertical(top: Radius.circular(24))),
-      builder: (_) => _VoiceRecordSheet(
-        onStartRecording: _beginRecorder,
-        onStopRecording: _endRecorder,
-        onDiscard: _discardRecording,
-        onSend: (path, duration) {
-          Navigator.pop(context);
-          _sendVoiceFile(path, duration);
-        },
-        onCancelSheet: () => Navigator.pop(context),
+      barrierDismissible: false,
+      barrierColor: Colors.black.withValues(alpha: 0.4),
+      builder: (_) => Dialog(
+        backgroundColor: Colors.transparent,
+        insetPadding: const EdgeInsets.symmetric(horizontal: 48),
+        child: _VoiceRecordSheet(
+          onStartRecording: _beginRecorder,
+          onStopRecording: _endRecorder,
+          onDiscard: _discardRecording,
+          onSend: (path, duration) {
+            Navigator.pop(context);
+            _sendVoiceFile(path, duration);
+          },
+          onCancelSheet: () => Navigator.pop(context),
+        ),
       ),
     );
   }
@@ -1770,6 +1782,10 @@ class _VoiceRecordSheetState extends State<_VoiceRecordSheet> {
   double _dragDy = 0;
   static const double _lockThreshold = 80;
   static const int _maxSeconds = 90;
+  // Extra insurance (on top of keeping idle/holding as one widget subtree)
+  // so Flutter preserves this exact element — and its live gesture
+  // recognizer — across the phase-change rebuild.
+  final GlobalKey _micGestureKey = GlobalKey();
 
   String? _recordedPath;
   AudioPlayer? _player;
@@ -1919,51 +1935,52 @@ class _VoiceRecordSheetState extends State<_VoiceRecordSheet> {
 
   @override
   Widget build(BuildContext context) {
-    return SafeArea(
-      child: Padding(
-        padding: const EdgeInsets.fromLTRB(24, 20, 24, 28),
-        child: AnimatedSize(
-          duration: const Duration(milliseconds: 200),
-          child: switch (_phase) {
-            _VRPhase.idle => _idleView(),
-            _VRPhase.holding => _holdingView(),
-            _VRPhase.locked => _lockedView(),
-            _VRPhase.review => _reviewView(),
-          },
-        ),
+    return Container(
+      width: 280,
+      padding: const EdgeInsets.fromLTRB(20, 24, 20, 24),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(24),
+        boxShadow: [
+          BoxShadow(
+              color: Colors.black.withValues(alpha: 0.25),
+              blurRadius: 20,
+              offset: const Offset(0, 8)),
+        ],
+      ),
+      child: AnimatedSize(
+        duration: const Duration(milliseconds: 200),
+        child: switch (_phase) {
+          _VRPhase.idle || _VRPhase.holding => _idleOrHoldingView(),
+          _VRPhase.locked => _lockedView(),
+          _VRPhase.review => _reviewView(),
+        },
       ),
     );
   }
 
-  Widget _idleView() {
-    return Column(mainAxisSize: MainAxisSize.min, children: [
-      const Text('Tap and hold to record',
-          style: TextStyle(fontSize: 15, fontWeight: FontWeight.w600)),
-      const SizedBox(height: 4),
-      const Text('Release early to review before sending',
-          style: TextStyle(fontSize: 12, color: AppTheme.cutMuted)),
-      const SizedBox(height: 20),
-      GestureDetector(
-        onLongPressStart: _onHoldStart,
-        onLongPressMoveUpdate: _onHoldMove,
-        onLongPressEnd: _onHoldEnd,
-        child: Container(
-          width: 72,
-          height: 72,
-          decoration: const BoxDecoration(
-              color: Colors.purple, shape: BoxShape.circle),
-          child: const Icon(Icons.mic, color: Colors.white, size: 32),
-        ),
-      ),
-      const SizedBox(height: 16),
-      TextButton(onPressed: widget.onCancelSheet, child: const Text('Cancel')),
-    ]);
-  }
-
-  Widget _holdingView() {
+  // Merged idle + holding view. IMPORTANT: this stays ONE widget subtree
+  // across the idle→holding transition (only inner content/colors change,
+  // never the GestureDetector's position in the tree). Previously idle
+  // and holding were two entirely separate widget trees swapped via a
+  // switch statement — Flutter tore down and rebuilt the GestureDetector
+  // mid-touch when that happened, which silently cancelled the gesture
+  // recognizer, so onLongPressEnd never fired and recording never
+  // stopped. Keeping it as one stable tree fixes that.
+  Widget _idleOrHoldingView() {
+    final holding = _phase == _VRPhase.holding;
     final lockProgress = (_dragDy / _lockThreshold).clamp(0.0, 1.0);
     return Column(mainAxisSize: MainAxisSize.min, children: [
-      Column(children: [
+      if (!holding) ...[
+        const Text('Tap and hold to record',
+            textAlign: TextAlign.center,
+            style: TextStyle(fontSize: 15, fontWeight: FontWeight.w600)),
+        const SizedBox(height: 4),
+        const Text('Release early to review before sending',
+            textAlign: TextAlign.center,
+            style: TextStyle(fontSize: 12, color: AppTheme.cutMuted)),
+        const SizedBox(height: 20),
+      ] else ...[
         Icon(Icons.keyboard_arrow_up,
             color: lockProgress >= 1 ? Colors.purple : AppTheme.cutMuted),
         Container(
@@ -1982,27 +1999,37 @@ class _VoiceRecordSheetState extends State<_VoiceRecordSheet> {
               size: 18,
               color: lockProgress >= 1 ? Colors.purple : AppTheme.cutMuted),
         ),
-      ]),
-      const SizedBox(height: 12),
-      Text(_fmt(_seconds),
-          style: const TextStyle(fontSize: 22, fontWeight: FontWeight.w700)),
-      const SizedBox(height: 4),
-      Text(lockProgress >= 1 ? 'Release to lock' : 'Slide up to lock',
-          style: const TextStyle(fontSize: 12, color: AppTheme.cutMuted)),
-      const SizedBox(height: 16),
-      Transform.translate(
-        offset: Offset(0, -_dragDy),
-        child: Container(
-          width: 72,
-          height: 72,
-          decoration: const BoxDecoration(
-              color: Colors.red, shape: BoxShape.circle),
-          child: const Icon(Icons.mic, color: Colors.white, size: 32),
+        const SizedBox(height: 12),
+        Text(_fmt(_seconds),
+            style: const TextStyle(fontSize: 22, fontWeight: FontWeight.w700)),
+        const SizedBox(height: 4),
+        Text(lockProgress >= 1 ? 'Release to lock' : 'Slide up to lock',
+            style: const TextStyle(fontSize: 12, color: AppTheme.cutMuted)),
+        const SizedBox(height: 16),
+      ],
+      GestureDetector(
+        key: _micGestureKey,
+        onLongPressStart: _onHoldStart,
+        onLongPressMoveUpdate: _onHoldMove,
+        onLongPressEnd: _onHoldEnd,
+        child: Transform.translate(
+          offset: Offset(0, holding ? -_dragDy : 0),
+          child: Container(
+            width: 72,
+            height: 72,
+            decoration: BoxDecoration(
+                color: holding ? Colors.red : Colors.purple,
+                shape: BoxShape.circle),
+            child: const Icon(Icons.mic, color: Colors.white, size: 32),
+          ),
         ),
       ),
-      const SizedBox(height: 8),
-      const Text('Release to stop & review',
-          style: TextStyle(fontSize: 11, color: AppTheme.cutMuted)),
+      SizedBox(height: holding ? 8 : 16),
+      if (!holding)
+        TextButton(onPressed: widget.onCancelSheet, child: const Text('Cancel'))
+      else
+        const Text('Release to stop & review',
+            style: TextStyle(fontSize: 11, color: AppTheme.cutMuted)),
     ]);
   }
 
