@@ -8,8 +8,10 @@ import 'package:video_player/video_player.dart';
 import 'package:flutter_cache_manager/flutter_cache_manager.dart';
 import 'package:just_audio/just_audio.dart';
 import 'package:record/record.dart';
+import 'package:scrollable_positioned_list/scrollable_positioned_list.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:provider/provider.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import 'package:url_launcher/url_launcher.dart';
 import '../../models/group_model.dart';
 import '../../models/user_model.dart';
@@ -79,7 +81,9 @@ class ChatScreen extends StatefulWidget {
 
 class _ChatScreenState extends State<ChatScreen> {
   final _ctrl = TextEditingController();
-  final _scroll = ScrollController();
+  final ItemScrollController _itemScrollController = ItemScrollController();
+  final ItemPositionsListener _itemPositionsListener =
+      ItemPositionsListener.create();
   bool _uploadingCover = false;
   bool _sendingMedia = false;
 
@@ -90,11 +94,78 @@ class _ChatScreenState extends State<ChatScreen> {
   late final Stream<GroupModel?> _groupStream;
   late final Stream<List<GroupMessage>> _messagesStream;
 
+  // The currently-displayed (newest-first) message list, kept up to date
+  // by the StreamBuilder so other methods (scroll-to-reply, new-message
+  // divider) can look up a message's index without re-querying Firestore.
+  List<GroupMessage> _currentMsgs = [];
+
+  // "Jump to newest" FAB visibility — shown once the user has scrolled
+  // away from index 0 (the newest message, since the list is reversed).
+  bool _showJumpToBottom = false;
+
+  // Scroll-to-reply highlight
+  String? _highlightedMsgId;
+  Timer? _highlightTimer;
+
+  // "New messages" divider — captured once per chat-open, based on how
+  // many messages exist at open time vs. locally-remembered last-seen
+  // message for this group (see _maybeCaptureUnreadDivider).
+  int? _unseenCountAtOpen;
+  bool _dividerDismissed = false;
+
   @override
   void initState() {
     super.initState();
     _groupStream = FirebaseService.instance.groupStream(widget.group.id);
     _messagesStream = FirebaseService.instance.messagesStream(widget.group.id);
+    _itemPositionsListener.itemPositions.addListener(_onScrollPositionsChanged);
+  }
+
+  void _onScrollPositionsChanged() {
+    final positions = _itemPositionsListener.itemPositions.value;
+    if (positions.isEmpty) return;
+    // With reverse:true, index 0 is the newest message. If it's not
+    // among the currently visible items, the user has scrolled up.
+    final minIndex =
+        positions.map((p) => p.index).reduce((a, b) => a < b ? a : b);
+    final shouldShow = minIndex > 0;
+    if (shouldShow != _showJumpToBottom) {
+      setState(() => _showJumpToBottom = shouldShow);
+    }
+    // Dismiss the "new messages" divider once the user scrolls back down
+    // to the newest message.
+    if (minIndex == 0 && !_dividerDismissed && _unseenCountAtOpen != null) {
+      setState(() => _dividerDismissed = true);
+    }
+  }
+
+  void _scrollToBottom({bool animate = true}) {
+    if (animate) {
+      _itemScrollController.scrollTo(
+          index: 0,
+          duration: const Duration(milliseconds: 300),
+          curve: Curves.easeOut);
+    } else if (_itemScrollController.isAttached) {
+      _itemScrollController.jumpTo(index: 0);
+    }
+  }
+
+  void _scrollToMessage(String messageId) {
+    final index = _currentMsgs.indexWhere((m) => m.id == messageId);
+    if (index == -1) {
+      _showSnack("Original message not found — it may have been deleted.");
+      return;
+    }
+    _itemScrollController.scrollTo(
+        index: index,
+        duration: const Duration(milliseconds: 400),
+        curve: Curves.easeInOut,
+        alignment: 0.35);
+    _highlightTimer?.cancel();
+    setState(() => _highlightedMsgId = messageId);
+    _highlightTimer = Timer(const Duration(milliseconds: 1600), () {
+      if (mounted) setState(() => _highlightedMsgId = null);
+    });
   }
 
   // Voice recording state
@@ -131,8 +202,9 @@ class _ChatScreenState extends State<ChatScreen> {
   @override
   void dispose() {
     _ctrl.dispose();
-    _scroll.dispose();
     _recorder.dispose();
+    _highlightTimer?.cancel();
+    _itemPositionsListener.itemPositions.removeListener(_onScrollPositionsChanged);
     super.dispose();
   }
 
@@ -143,7 +215,10 @@ class _ChatScreenState extends State<ChatScreen> {
     if (user == null) return;
     final replyTo = _replyingTo;
     _ctrl.clear();
-    setState(() => _replyingTo = null);
+    setState(() {
+      _replyingTo = null;
+      _dividerDismissed = true; // sending a message dismisses the divider
+    });
     try {
       await FirebaseService.instance.sendMessage(GroupMessage(
         id: '',
@@ -164,15 +239,7 @@ class _ChatScreenState extends State<ChatScreen> {
     }
   }
 
-  void _scrollBottom() {
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      // With reverse:true, offset 0 IS the bottom/newest-message anchor.
-      if (_scroll.hasClients) {
-        _scroll.animateTo(0,
-            duration: const Duration(milliseconds: 250), curve: Curves.easeOut);
-      }
-    });
-  }
+  void _scrollBottom() => _scrollToBottom();
 
   void _showAttachMenu() {
     showModalBottomSheet(
@@ -196,20 +263,20 @@ class _ChatScreenState extends State<ChatScreen> {
             const SizedBox(height: 12),
             Row(mainAxisAlignment: MainAxisAlignment.spaceEvenly, children: [
               _AttachBtn(
-                  icon: Icons.image_outlined,
-                  label: 'Image',
+                  icon: Icons.camera_alt_outlined,
+                  label: 'Camera',
                   color: AppTheme.cutBlue,
                   onTap: () {
                     Navigator.pop(context);
-                    _pickImage();
+                    _showCameraOptions();
                   }),
               _AttachBtn(
-                  icon: Icons.videocam_outlined,
-                  label: 'Video',
+                  icon: Icons.photo_library_outlined,
+                  label: 'Gallery',
                   color: Colors.deepOrange,
                   onTap: () {
                     Navigator.pop(context);
-                    _pickVideo();
+                    _pickFromGallery();
                   }),
               // FIX: voice note restored
               _AttachBtn(
@@ -218,7 +285,7 @@ class _ChatScreenState extends State<ChatScreen> {
                   color: Colors.purple,
                   onTap: () {
                     Navigator.pop(context);
-                    _startVoiceRecording();
+                    _openVoiceRecordSheet();
                   }),
               // FIX: location sharing restored (was a placeholder toast)
               _AttachBtn(
@@ -237,19 +304,66 @@ class _ChatScreenState extends State<ChatScreen> {
     );
   }
 
-  // ── Image ─────────────────────────────────────────────────────
-  Future<void> _pickImage() async {
-    final picked = await ImagePicker()
-        .pickImage(source: ImageSource.gallery, imageQuality: 85);
-    if (picked == null || !mounted) return;
-    final file = File(picked.path);
+  void _showCameraOptions() {
+    showModalBottomSheet(
+      context: context,
+      shape: const RoundedRectangleBorder(
+          borderRadius: BorderRadius.vertical(top: Radius.circular(20))),
+      builder: (_) => SafeArea(
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(16, 16, 16, 24),
+          child: Column(mainAxisSize: MainAxisSize.min, children: [
+            Center(
+                child: Container(
+                    width: 40,
+                    height: 4,
+                    margin: const EdgeInsets.only(bottom: 16),
+                    decoration: BoxDecoration(
+                        color: AppTheme.cutBorder,
+                        borderRadius: BorderRadius.circular(2)))),
+            const Text('Camera',
+                style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700)),
+            const SizedBox(height: 12),
+            Row(mainAxisAlignment: MainAxisAlignment.spaceEvenly, children: [
+              _AttachBtn(
+                  icon: Icons.camera_alt,
+                  label: 'Take Photo',
+                  color: AppTheme.cutBlue,
+                  onTap: () {
+                    Navigator.pop(context);
+                    _captureImage();
+                  }),
+              _AttachBtn(
+                  icon: Icons.videocam,
+                  label: 'Record Video',
+                  color: Colors.deepOrange,
+                  onTap: () {
+                    Navigator.pop(context);
+                    _captureVideo();
+                  }),
+            ]),
+          ]),
+        ),
+      ),
+    );
+  }
+
+  // ── Shared send helpers — both gallery and camera funnel through
+  // these, so upload logic, reply attachment, and error handling only
+  // exist in one place. ──────────────────────────────────────────
+  Future<void> _sendImageFile(File file) async {
     if (await file.length() > 5 * 1024 * 1024) {
       _showSnack('Image must be under 5 MB.', error: true);
       return;
     }
     final user = context.read<UserProvider>().user;
     if (user == null) return;
-    setState(() => _sendingMedia = true);
+    final replyTo = _replyingTo;
+    setState(() {
+      _sendingMedia = true;
+      _replyingTo = null;
+      _dividerDismissed = true;
+    });
     try {
       final msgId = await FirebaseService.instance.sendMessage(GroupMessage(
         id: '',
@@ -260,6 +374,10 @@ class _ChatScreenState extends State<ChatScreen> {
         text: '',
         messageType: MessageType.image,
         createdAt: DateTime.now(),
+        replyToMessageId: replyTo?.id,
+        replyToSenderName: replyTo?.userName,
+        replyToText: replyTo != null ? _replyPreviewFor(replyTo) : null,
+        replyToType: replyTo?.messageType.value,
       ));
       final url = await FirebaseService.instance
           .uploadChatImage(widget.group.id, msgId, file);
@@ -273,14 +391,15 @@ class _ChatScreenState extends State<ChatScreen> {
     }
   }
 
-  // ── Video (max 30s) ──────────────────────────────────────────
-  Future<void> _pickVideo() async {
-    final picked = await ImagePicker().pickVideo(
-        source: ImageSource.gallery, maxDuration: const Duration(seconds: 30));
-    if (picked == null || !mounted) return;
+  Future<void> _sendVideoFile(File file) async {
     final user = context.read<UserProvider>().user;
     if (user == null) return;
-    setState(() => _sendingMedia = true);
+    final replyTo = _replyingTo;
+    setState(() {
+      _sendingMedia = true;
+      _replyingTo = null;
+      _dividerDismissed = true;
+    });
     try {
       final msgId = await FirebaseService.instance.sendMessage(GroupMessage(
         id: '',
@@ -291,9 +410,13 @@ class _ChatScreenState extends State<ChatScreen> {
         text: '',
         messageType: MessageType.video,
         createdAt: DateTime.now(),
+        replyToMessageId: replyTo?.id,
+        replyToSenderName: replyTo?.userName,
+        replyToText: replyTo != null ? _replyPreviewFor(replyTo) : null,
+        replyToType: replyTo?.messageType.value,
       ));
       final url = await FirebaseService.instance
-          .uploadChatVideo(widget.group.id, msgId, File(picked.path));
+          .uploadChatVideo(widget.group.id, msgId, file);
       await FirebaseService.instance
           .updateMessageMedia(widget.group.id, msgId, url);
       _scrollBottom();
@@ -304,12 +427,62 @@ class _ChatScreenState extends State<ChatScreen> {
     }
   }
 
-  // ── Voice note (max 90s) ─────────────────────────────────────
-  Future<void> _startVoiceRecording() async {
+  // ── Gallery — merged photo/video picker (image_picker's pickMedia
+  // supports both in a single native picker UI) ─────────────────
+  Future<void> _pickFromGallery() async {
+    final picked = await ImagePicker().pickMedia();
+    if (picked == null || !mounted) return;
+    final path = picked.path.toLowerCase();
+    const videoExts = ['.mp4', '.mov', '.m4v', '.avi', '.3gp', '.webm', '.mkv'];
+    final isVideo = videoExts.any((ext) => path.endsWith(ext));
+    if (isVideo) {
+      await _sendVideoFile(File(picked.path));
+    } else {
+      await _sendImageFile(File(picked.path));
+    }
+  }
+
+  // ── Camera — live capture ────────────────────────────────────
+  Future<void> _captureImage() async {
+    final picked = await ImagePicker()
+        .pickImage(source: ImageSource.camera, imageQuality: 85);
+    if (picked == null || !mounted) return;
+    await _sendImageFile(File(picked.path));
+  }
+
+  Future<void> _captureVideo() async {
+    final picked = await ImagePicker().pickVideo(
+        source: ImageSource.camera, maxDuration: const Duration(seconds: 30));
+    if (picked == null || !mounted) return;
+    await _sendVideoFile(File(picked.path));
+  }
+
+  // ── Voice note recording (tap-and-hold, swipe up to lock) ─────
+  void _openVoiceRecordSheet() {
+    showModalBottomSheet(
+      context: context,
+      isDismissible: false,
+      enableDrag: false,
+      shape: const RoundedRectangleBorder(
+          borderRadius: BorderRadius.vertical(top: Radius.circular(24))),
+      builder: (_) => _VoiceRecordSheet(
+        onStartRecording: _beginRecorder,
+        onStopRecording: _endRecorder,
+        onDiscard: _discardRecording,
+        onSend: (path, duration) {
+          Navigator.pop(context);
+          _sendVoiceFile(path, duration);
+        },
+        onCancelSheet: () => Navigator.pop(context),
+      ),
+    );
+  }
+
+  Future<bool> _beginRecorder() async {
     if (!await _recorder.hasPermission()) {
       _showSnack('Microphone permission is required to record voice notes.',
           error: true);
-      return;
+      return false;
     }
     final dir = await getTemporaryDirectory();
     final path =
@@ -317,47 +490,33 @@ class _ChatScreenState extends State<ChatScreen> {
     await _recorder.start(const RecordConfig(), path: path);
     _recordPath = path;
     setState(() => _isRecording = true);
-    if (mounted) _showRecordingSheet();
+    return true;
   }
 
-  void _showRecordingSheet() {
-    showModalBottomSheet(
-      context: context,
-      isDismissible: false,
-      enableDrag: false,
-      shape: const RoundedRectangleBorder(
-          borderRadius: BorderRadius.vertical(top: Radius.circular(20))),
-      builder: (_) => _RecordingSheet(
-        maxSeconds: 90,
-        onCancel: (seconds) {
-          Navigator.pop(context);
-          _stopVoiceRecording(send: false, duration: seconds);
-        },
-        onSend: (seconds) {
-          Navigator.pop(context);
-          _stopVoiceRecording(send: true, duration: seconds);
-        },
-      ),
-    );
-  }
-
-  Future<void> _stopVoiceRecording(
-      {required bool send, required int duration}) async {
+  Future<String?> _endRecorder() async {
     final path = await _recorder.stop();
     setState(() => _isRecording = false);
+    return path;
+  }
 
-    if (!send || path == null) {
-      if (path != null) {
-        try {
-          await File(path).delete();
-        } catch (_) {}
-      }
-      return;
+  Future<void> _discardRecording() async {
+    final path = await _endRecorder();
+    if (path != null) {
+      try {
+        await File(path).delete();
+      } catch (_) {}
     }
+  }
 
+  Future<void> _sendVoiceFile(String path, int duration) async {
     final user = context.read<UserProvider>().user;
     if (user == null) return;
-    setState(() => _sendingMedia = true);
+    final replyTo = _replyingTo;
+    setState(() {
+      _sendingMedia = true;
+      _replyingTo = null;
+      _dividerDismissed = true;
+    });
     try {
       final msgId = await FirebaseService.instance.sendMessage(GroupMessage(
         id: '',
@@ -369,6 +528,10 @@ class _ChatScreenState extends State<ChatScreen> {
         messageType: MessageType.voice,
         mediaDuration: duration,
         createdAt: DateTime.now(),
+        replyToMessageId: replyTo?.id,
+        replyToSenderName: replyTo?.userName,
+        replyToText: replyTo != null ? _replyPreviewFor(replyTo) : null,
+        replyToType: replyTo?.messageType.value,
       ));
       final url = await FirebaseService.instance
           .uploadVoiceNote(widget.group.id, msgId, File(path));
@@ -380,6 +543,9 @@ class _ChatScreenState extends State<ChatScreen> {
       _showSnack(e.toString().replaceFirst('Exception: ', ''), error: true);
     } finally {
       if (mounted) setState(() => _sendingMedia = false);
+      try {
+        await File(path).delete();
+      } catch (_) {}
     }
   }
 
@@ -633,47 +799,90 @@ class _ChatScreenState extends State<ChatScreen> {
                         icon: Icons.chat_bubble_outline,
                         title: 'No messages yet',
                         subtitle: 'Start the conversation.');
-                  return ListView.builder(
-                    controller: _scroll,
-                    reverse: true,
-                    padding: const EdgeInsets.symmetric(
-                        horizontal: 12, vertical: 12),
-                    itemCount: msgs.length,
-                    itemBuilder: (_, i) {
-                      final msg = msgs[i];
-                      final mine = msg.userId == uid;
-                      final isAdminMsg = msg.userId == group.adminId;
-                      // In this reversed list, index i+1 is the chronologically
-                      // OLDER neighbour (since index 0 = newest).
-                      final older = i + 1 < msgs.length ? msgs[i + 1] : null;
-                      final showDate = older == null ||
-                          !_sameDay(older.createdAt, msg.createdAt);
-                      final showName = !mine &&
-                          (older == null ||
-                              older.userId != msg.userId ||
-                              msg.createdAt
-                                      .difference(older.createdAt)
-                                      .inMinutes
-                                      .abs() >=
-                                  10);
-                      return Column(
-                        key: ValueKey(msg.id),
-                        children: [
-                          if (showDate) _DateSep(msg.createdAt),
-                          _Bubble(
-                              msg: msg,
-                              mine: mine,
-                              showName: showName,
-                              isAdminMsg: isAdminMsg,
-                              onAvatarTap: () => Navigator.of(context).push(
-                                  MaterialPageRoute(
-                                      builder: (_) => UserProfileScreen(
-                                          userId: msg.userId))),
-                              onReply: () => _startReply(msg)),
-                        ],
-                      );
-                    },
-                  );
+                  _currentMsgs = msgs;
+                  _maybeCaptureUnreadDivider(msgs);
+                  return Stack(children: [
+                    ScrollablePositionedList.builder(
+                      itemScrollController: _itemScrollController,
+                      itemPositionsListener: _itemPositionsListener,
+                      reverse: true,
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 12, vertical: 12),
+                      itemCount: msgs.length,
+                      itemBuilder: (_, i) {
+                        final msg = msgs[i];
+                        final mine = msg.userId == uid;
+                        final isAdminMsg = msg.userId == group.adminId;
+                        // In this reversed list, index i+1 is the
+                        // chronologically OLDER neighbour (index 0 = newest).
+                        final older = i + 1 < msgs.length ? msgs[i + 1] : null;
+                        final showDate = older == null ||
+                            !_sameDay(older.createdAt, msg.createdAt);
+                        final showName = !mine &&
+                            (older == null ||
+                                older.userId != msg.userId ||
+                                msg.createdAt
+                                        .difference(older.createdAt)
+                                        .inMinutes
+                                        .abs() >=
+                                    10);
+                        final showUnreadDivider = !_dividerDismissed &&
+                            _unseenCountAtOpen != null &&
+                            _unseenCountAtOpen! > 0 &&
+                            i ==
+                                (_unseenCountAtOpen! - 1)
+                                    .clamp(0, msgs.length - 1);
+                        return Column(
+                          key: ValueKey(msg.id),
+                          children: [
+                            if (showDate) _DateSep(msg.createdAt),
+                            if (showUnreadDivider)
+                              _UnreadDivider(count: _unseenCountAtOpen!),
+                            _Bubble(
+                                msg: msg,
+                                mine: mine,
+                                showName: showName,
+                                isAdminMsg: isAdminMsg,
+                                isHighlighted: _highlightedMsgId == msg.id,
+                                onAvatarTap: () => Navigator.of(context).push(
+                                    MaterialPageRoute(
+                                        builder: (_) => UserProfileScreen(
+                                            userId: msg.userId))),
+                                onReply: () => _startReply(msg),
+                                onTapReplyQuote: msg.replyToMessageId != null
+                                    ? () =>
+                                        _scrollToMessage(msg.replyToMessageId!)
+                                    : null),
+                          ],
+                        );
+                      },
+                    ),
+                    if (_showJumpToBottom)
+                      Positioned(
+                        right: 12,
+                        bottom: 12,
+                        child: GestureDetector(
+                          onTap: () => _scrollToBottom(),
+                          child: Container(
+                            width: 44,
+                            height: 44,
+                            decoration: BoxDecoration(
+                              color: Colors.white,
+                              shape: BoxShape.circle,
+                              boxShadow: [
+                                BoxShadow(
+                                    color: Colors.black.withValues(alpha: 0.15),
+                                    blurRadius: 8,
+                                    offset: const Offset(0, 2))
+                              ],
+                              border: Border.all(color: AppTheme.cutBorder),
+                            ),
+                            child: const Icon(Icons.keyboard_arrow_down,
+                                color: AppTheme.cutBlue, size: 26),
+                          ),
+                        ),
+                      ),
+                  ]);
                 },
               ),
             ),
@@ -694,6 +903,31 @@ class _ChatScreenState extends State<ChatScreen> {
         );
       },
     );
+  }
+
+  // Captures "how many messages are new since last visit" exactly once
+  // per chat-open, and remembers the current newest message for next time.
+  void _maybeCaptureUnreadDivider(List<GroupMessage> msgs) {
+    if (_unseenCountAtOpen != null) return; // already captured this session
+    if (msgs.isEmpty) return;
+    // Wait for SharedPreferences to finish loading (initState is async).
+    WidgetsBinding.instance.addPostFrameCallback((_) async {
+      if (!mounted || _unseenCountAtOpen != null) return;
+      final prefs = await SharedPreferences.getInstance();
+      final key = 'last_seen_msg_${widget.group.id}';
+      final lastSeenId = prefs.getString(key);
+      int count;
+      if (lastSeenId == null) {
+        // Never opened this chat before on this device — don't show a
+        // divider for the entire history, just mark everything seen.
+        count = 0;
+      } else {
+        final idx = msgs.indexWhere((m) => m.id == lastSeenId);
+        count = idx == -1 ? 0 : idx; // messages newer than lastSeenId
+      }
+      await prefs.setString(key, msgs.first.id); // remember newest for next time
+      if (mounted) setState(() => _unseenCountAtOpen = count);
+    });
   }
 
   bool _sameDay(DateTime a, DateTime b) =>
@@ -1089,15 +1323,19 @@ class _MemberTile extends StatelessWidget {
 class _Bubble extends StatelessWidget {
   final GroupMessage msg;
   final bool mine, showName, isAdminMsg;
+  final bool isHighlighted;
   final VoidCallback onAvatarTap;
   final VoidCallback onReply;
+  final VoidCallback? onTapReplyQuote;
   const _Bubble(
       {required this.msg,
       required this.mine,
       required this.showName,
       required this.isAdminMsg,
+      this.isHighlighted = false,
       required this.onAvatarTap,
-      required this.onReply});
+      required this.onReply,
+      this.onTapReplyQuote});
 
   @override
   Widget build(BuildContext context) {
@@ -1108,7 +1346,12 @@ class _Bubble extends StatelessWidget {
         msg.mediaUrl != null &&
         msg.mediaUrl!.isNotEmpty;
 
-    return Align(
+    return AnimatedContainer(
+      duration: const Duration(milliseconds: 300),
+      color: isHighlighted
+          ? AppTheme.cutBlue.withValues(alpha: 0.12)
+          : Colors.transparent,
+      child: Align(
       alignment: mine ? Alignment.centerRight : Alignment.centerLeft,
       child: Row(
         mainAxisAlignment:
@@ -1139,6 +1382,7 @@ class _Bubble extends StatelessWidget {
                 isAdminMsg: isAdminMsg,
                 accentColor: sc,
                 content: _buildContent(context, mine),
+                onTapReplyQuote: onTapReplyQuote,
               ),
             )
           else
@@ -1185,7 +1429,8 @@ class _Bubble extends StatelessWidget {
                               const VerifiedBadge(size: 12)
                             ],
                           ])),
-                    if (msg.replyToText != null) _ReplyQuote(msg: msg, mine: mine),
+                    if (msg.replyToText != null)
+                      _ReplyQuote(msg: msg, mine: mine, onTap: onTapReplyQuote),
                     _buildContent(context, mine),
                     const SizedBox(height: 5),
                     Row(mainAxisSize: MainAxisSize.min, children: [
@@ -1209,6 +1454,7 @@ class _Bubble extends StatelessWidget {
             ),
           if (mine) const SizedBox(width: 4),
         ],
+      ),
       ),
     );
   }
@@ -1495,92 +1741,373 @@ class _CachedVideoPlayerScreenState extends State<_CachedVideoPlayerScreen> {
 }
 
 
-class _RecordingSheet extends StatefulWidget {
-  final int maxSeconds;
-  final ValueChanged<int> onCancel;
-  final ValueChanged<int> onSend;
-  const _RecordingSheet(
-      {required this.maxSeconds, required this.onCancel, required this.onSend});
+enum _VRPhase { idle, holding, locked, review }
+
+// ─── Voice recording sheet: tap-and-hold, swipe up to lock, then
+// delete / playback / send. Nothing is ever sent automatically. ───────
+class _VoiceRecordSheet extends StatefulWidget {
+  final Future<bool> Function() onStartRecording;
+  final Future<String?> Function() onStopRecording;
+  final Future<void> Function() onDiscard;
+  final void Function(String path, int durationSeconds) onSend;
+  final VoidCallback onCancelSheet;
+  const _VoiceRecordSheet({
+    required this.onStartRecording,
+    required this.onStopRecording,
+    required this.onDiscard,
+    required this.onSend,
+    required this.onCancelSheet,
+  });
 
   @override
-  State<_RecordingSheet> createState() => _RecordingSheetState();
+  State<_VoiceRecordSheet> createState() => _VoiceRecordSheetState();
 }
 
-class _RecordingSheetState extends State<_RecordingSheet> {
+class _VoiceRecordSheetState extends State<_VoiceRecordSheet> {
+  _VRPhase _phase = _VRPhase.idle;
   int _seconds = 0;
   Timer? _timer;
-  bool _autoSent = false;
+  double _dragDy = 0;
+  static const double _lockThreshold = 80;
+  static const int _maxSeconds = 90;
 
-  @override
-  void initState() {
-    super.initState();
-    _timer = Timer.periodic(const Duration(seconds: 1), (t) {
+  String? _recordedPath;
+  AudioPlayer? _player;
+  bool _isPlaying = false;
+  Duration _playPos = Duration.zero;
+  Duration _playDur = Duration.zero;
+  StreamSubscription? _posSub;
+  StreamSubscription? _stateSub;
+
+  void _startTimer() {
+    _timer?.cancel();
+    _timer = Timer.periodic(const Duration(seconds: 1), (t) async {
       if (!mounted) return;
       setState(() => _seconds++);
-      if (_seconds >= widget.maxSeconds && !_autoSent) {
-        _autoSent = true;
+      if (_seconds >= _maxSeconds) {
         t.cancel();
-        widget.onSend(_seconds);
+        await _finishRecording();
       }
     });
+  }
+
+  Future<void> _onHoldStart(LongPressStartDetails d) async {
+    if (_phase != _VRPhase.idle) return;
+    final ok = await widget.onStartRecording();
+    if (!ok || !mounted) return;
+    setState(() {
+      _phase = _VRPhase.holding;
+      _seconds = 0;
+      _dragDy = 0;
+    });
+    _startTimer();
+  }
+
+  void _onHoldMove(LongPressMoveUpdateDetails d) {
+    if (_phase != _VRPhase.holding) return;
+    final dy = (-d.offsetFromOrigin.dy).clamp(0.0, _lockThreshold + 20);
+    setState(() => _dragDy = dy);
+    if (dy >= _lockThreshold) setState(() => _phase = _VRPhase.locked);
+  }
+
+  Future<void> _onHoldEnd(LongPressEndDetails d) async {
+    if (_phase != _VRPhase.holding) return; // already locked → hands-free
+    await _finishRecording();
+  }
+
+  Future<void> _finishRecording() async {
+    _timer?.cancel();
+    final path = await widget.onStopRecording();
+    if (!mounted) return;
+    if (path == null || _seconds < 1) {
+      if (path != null) await widget.onDiscard();
+      setState(() {
+        _phase = _VRPhase.idle;
+        _seconds = 0;
+        _dragDy = 0;
+      });
+      return;
+    }
+    setState(() {
+      _recordedPath = path;
+      _phase = _VRPhase.review;
+    });
+  }
+
+  Future<void> _stopFromLocked() async {
+    _timer?.cancel();
+    final path = await widget.onStopRecording();
+    if (!mounted) return;
+    if (path == null) {
+      setState(() {
+        _phase = _VRPhase.idle;
+        _seconds = 0;
+        _dragDy = 0;
+      });
+      return;
+    }
+    setState(() {
+      _recordedPath = path;
+      _phase = _VRPhase.review;
+    });
+  }
+
+  Future<void> _discard() async {
+    _timer?.cancel();
+    await _player?.stop();
+    if (_phase == _VRPhase.holding || _phase == _VRPhase.locked) {
+      await widget.onDiscard();
+    } else if (_recordedPath != null) {
+      try {
+        await File(_recordedPath!).delete();
+      } catch (_) {}
+    }
+    widget.onCancelSheet();
+  }
+
+  Future<void> _togglePlay() async {
+    if (_recordedPath == null) return;
+    if (_player == null) {
+      _player = AudioPlayer();
+      await _player!.setFilePath(_recordedPath!);
+      _posSub = _player!.positionStream.listen((p) {
+        if (mounted) setState(() => _playPos = p);
+      });
+      _player!.durationStream.listen((d) {
+        if (mounted && d != null) setState(() => _playDur = d);
+      });
+      _stateSub = _player!.playerStateStream.listen((s) {
+        if (!mounted) return;
+        if (s.processingState == ProcessingState.completed) {
+          setState(() {
+            _isPlaying = false;
+            _playPos = Duration.zero;
+          });
+          _player!.seek(Duration.zero);
+        }
+      });
+    }
+    if (_isPlaying) {
+      await _player!.pause();
+      setState(() => _isPlaying = false);
+    } else {
+      await _player!.play();
+      setState(() => _isPlaying = true);
+    }
+  }
+
+  void _send() {
+    if (_recordedPath == null) return;
+    _player?.stop();
+    widget.onSend(_recordedPath!, _seconds);
   }
 
   @override
   void dispose() {
     _timer?.cancel();
+    _posSub?.cancel();
+    _stateSub?.cancel();
+    _player?.dispose();
     super.dispose();
+  }
+
+  String _fmt(int totalSeconds) {
+    final m = (totalSeconds ~/ 60).toString().padLeft(2, '0');
+    final s = (totalSeconds % 60).toString().padLeft(2, '0');
+    return '$m:$s';
   }
 
   @override
   Widget build(BuildContext context) {
-    final progress = _seconds / widget.maxSeconds;
     return SafeArea(
       child: Padding(
-        padding: const EdgeInsets.all(24),
-        child: Column(mainAxisSize: MainAxisSize.min, children: [
-          Stack(alignment: Alignment.center, children: [
-            SizedBox(
-              width: 72,
-              height: 72,
-              child: CircularProgressIndicator(
-                value: progress.clamp(0, 1),
-                strokeWidth: 3,
-                backgroundColor: Colors.purple.withValues(alpha: 0.15),
-                valueColor: const AlwaysStoppedAnimation(Colors.purple),
+        padding: const EdgeInsets.fromLTRB(24, 20, 24, 28),
+        child: AnimatedSize(
+          duration: const Duration(milliseconds: 200),
+          child: switch (_phase) {
+            _VRPhase.idle => _idleView(),
+            _VRPhase.holding => _holdingView(),
+            _VRPhase.locked => _lockedView(),
+            _VRPhase.review => _reviewView(),
+          },
+        ),
+      ),
+    );
+  }
+
+  Widget _idleView() {
+    return Column(mainAxisSize: MainAxisSize.min, children: [
+      const Text('Tap and hold to record',
+          style: TextStyle(fontSize: 15, fontWeight: FontWeight.w600)),
+      const SizedBox(height: 4),
+      const Text('Release early to review before sending',
+          style: TextStyle(fontSize: 12, color: AppTheme.cutMuted)),
+      const SizedBox(height: 20),
+      GestureDetector(
+        onLongPressStart: _onHoldStart,
+        onLongPressMoveUpdate: _onHoldMove,
+        onLongPressEnd: _onHoldEnd,
+        child: Container(
+          width: 72,
+          height: 72,
+          decoration: const BoxDecoration(
+              color: Colors.purple, shape: BoxShape.circle),
+          child: const Icon(Icons.mic, color: Colors.white, size: 32),
+        ),
+      ),
+      const SizedBox(height: 16),
+      TextButton(onPressed: widget.onCancelSheet, child: const Text('Cancel')),
+    ]);
+  }
+
+  Widget _holdingView() {
+    final lockProgress = (_dragDy / _lockThreshold).clamp(0.0, 1.0);
+    return Column(mainAxisSize: MainAxisSize.min, children: [
+      Column(children: [
+        Icon(Icons.keyboard_arrow_up,
+            color: lockProgress >= 1 ? Colors.purple : AppTheme.cutMuted),
+        Container(
+          width: 34,
+          height: 34,
+          decoration: BoxDecoration(
+            shape: BoxShape.circle,
+            border: Border.all(
+                color: lockProgress >= 1 ? Colors.purple : AppTheme.cutBorder,
+                width: 2),
+            color: lockProgress >= 1
+                ? Colors.purple.withValues(alpha: 0.1)
+                : null,
+          ),
+          child: Icon(Icons.lock_outline,
+              size: 18,
+              color: lockProgress >= 1 ? Colors.purple : AppTheme.cutMuted),
+        ),
+      ]),
+      const SizedBox(height: 12),
+      Text(_fmt(_seconds),
+          style: const TextStyle(fontSize: 22, fontWeight: FontWeight.w700)),
+      const SizedBox(height: 4),
+      Text(lockProgress >= 1 ? 'Release to lock' : 'Slide up to lock',
+          style: const TextStyle(fontSize: 12, color: AppTheme.cutMuted)),
+      const SizedBox(height: 16),
+      Transform.translate(
+        offset: Offset(0, -_dragDy),
+        child: Container(
+          width: 72,
+          height: 72,
+          decoration: const BoxDecoration(
+              color: Colors.red, shape: BoxShape.circle),
+          child: const Icon(Icons.mic, color: Colors.white, size: 32),
+        ),
+      ),
+      const SizedBox(height: 8),
+      const Text('Release to stop & review',
+          style: TextStyle(fontSize: 11, color: AppTheme.cutMuted)),
+    ]);
+  }
+
+  Widget _lockedView() {
+    return Column(mainAxisSize: MainAxisSize.min, children: [
+      Row(mainAxisSize: MainAxisSize.min, children: [
+        Container(
+            width: 10,
+            height: 10,
+            decoration: const BoxDecoration(
+                color: Colors.red, shape: BoxShape.circle)),
+        const SizedBox(width: 8),
+        Text(_fmt(_seconds),
+            style:
+                const TextStyle(fontSize: 18, fontWeight: FontWeight.w700)),
+      ]),
+      const SizedBox(height: 4),
+      const Text('Recording locked — hands-free',
+          style: TextStyle(fontSize: 12, color: AppTheme.cutMuted)),
+      const SizedBox(height: 20),
+      Row(mainAxisAlignment: MainAxisAlignment.spaceEvenly, children: [
+        _roundIconBtn(
+            icon: Icons.delete_outline,
+            color: AppTheme.cutRed,
+            onTap: _discard),
+        _roundIconBtn(
+            icon: Icons.stop,
+            color: Colors.purple,
+            big: true,
+            onTap: _stopFromLocked),
+      ]),
+    ]);
+  }
+
+  Widget _reviewView() {
+    return Row(children: [
+      _roundIconBtn(
+          icon: Icons.delete_outline, color: AppTheme.cutRed, onTap: _discard),
+      const SizedBox(width: 12),
+      GestureDetector(
+        onTap: _togglePlay,
+        child: Container(
+          width: 44,
+          height: 44,
+          decoration:
+              const BoxDecoration(color: Colors.purple, shape: BoxShape.circle),
+          child: Icon(_isPlaying ? Icons.pause : Icons.play_arrow,
+              color: Colors.white),
+        ),
+      ),
+      const SizedBox(width: 10),
+      Expanded(
+        child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              SliderTheme(
+                data: SliderTheme.of(context).copyWith(
+                    trackHeight: 3,
+                    thumbShape:
+                        const RoundSliderThumbShape(enabledThumbRadius: 5)),
+                child: Slider(
+                  value: _playPos.inMilliseconds
+                      .toDouble()
+                      .clamp(0, _playDur.inMilliseconds.toDouble().clamp(1, double.infinity)),
+                  max: _playDur.inMilliseconds.toDouble().clamp(1, double.infinity),
+                  activeColor: Colors.purple,
+                  onChanged: (v) => _player?.seek(Duration(milliseconds: v.round())),
+                ),
               ),
-            ),
-            Container(
-                width: 56,
-                height: 56,
-                decoration: const BoxDecoration(
-                    color: Colors.purple, shape: BoxShape.circle),
-                child: const Icon(Icons.mic, color: Colors.white, size: 26)),
-          ]),
-          const SizedBox(height: 14),
-          Text('${_seconds}s / ${widget.maxSeconds}s',
-              style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w700)),
-          const SizedBox(height: 4),
-          const Text('Recording voice note…',
-              style: TextStyle(fontSize: 12, color: AppTheme.cutMuted)),
-          const SizedBox(height: 20),
-          Row(children: [
-            Expanded(
-                child: OutlinedButton(
-              onPressed: () => widget.onCancel(_seconds),
-              style: OutlinedButton.styleFrom(
-                  foregroundColor: AppTheme.cutRed,
-                  side: const BorderSide(color: AppTheme.cutRed)),
-              child: const Text('Cancel'),
-            )),
-            const SizedBox(width: 10),
-            Expanded(
-                child: ElevatedButton(
-              onPressed: () => widget.onSend(_seconds),
-              style: ElevatedButton.styleFrom(backgroundColor: Colors.purple),
-              child: const Text('Send'),
-            )),
-          ]),
-        ]),
+              Text(_fmt(_seconds),
+                  style:
+                      const TextStyle(fontSize: 11, color: AppTheme.cutMuted)),
+            ]),
+      ),
+      const SizedBox(width: 10),
+      GestureDetector(
+        onTap: _send,
+        child: Container(
+          width: 44,
+          height: 44,
+          decoration: const BoxDecoration(
+              color: AppTheme.cutBlue, shape: BoxShape.circle),
+          child: const Icon(Icons.send_rounded, color: Colors.white, size: 20),
+        ),
+      ),
+    ]);
+  }
+
+  Widget _roundIconBtn(
+      {required IconData icon,
+      required Color color,
+      VoidCallback? onTap,
+      bool big = false}) {
+    final size = big ? 56.0 : 44.0;
+    return GestureDetector(
+      onTap: onTap,
+      child: Container(
+        width: size,
+        height: size,
+        decoration: BoxDecoration(
+            color: color.withValues(alpha: 0.12),
+            shape: BoxShape.circle,
+            border: Border.all(color: color.withValues(alpha: 0.4))),
+        child: Icon(icon, color: color, size: big ? 26 : 20),
       ),
     );
   }
@@ -1592,6 +2119,7 @@ class _MediaBubble extends StatelessWidget {
   final bool mine, showName, isAdminMsg;
   final Color accentColor;
   final Widget content;
+  final VoidCallback? onTapReplyQuote;
   const _MediaBubble({
     required this.msg,
     required this.mine,
@@ -1599,6 +2127,7 @@ class _MediaBubble extends StatelessWidget {
     required this.isAdminMsg,
     required this.accentColor,
     required this.content,
+    this.onTapReplyQuote,
   });
 
   @override
@@ -1626,7 +2155,7 @@ class _MediaBubble extends StatelessWidget {
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
               if (msg.replyToText != null)
-                _ReplyQuote(msg: msg, mine: mine, dense: true),
+                _ReplyQuote(msg: msg, mine: mine, dense: true, onTap: onTapReplyQuote),
               Stack(children: [
                 content,
                 // Sender name chip (group chats only)
@@ -2292,11 +2821,43 @@ class _AttachBtn extends StatelessWidget {
 }
 
 // ─── Quoted-reply snippet — shown inside a bubble that is a reply ─────
+// ─── "X new messages" divider — shown once per chat-open session ──────
+class _UnreadDivider extends StatelessWidget {
+  final int count;
+  const _UnreadDivider({required this.count});
+
+  @override
+  Widget build(BuildContext context) => Padding(
+        padding: const EdgeInsets.symmetric(vertical: 10),
+        child: Row(children: [
+          const Expanded(child: Divider(color: AppTheme.cutRed, thickness: 0.8)),
+          Container(
+            margin: const EdgeInsets.symmetric(horizontal: 8),
+            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+            decoration: BoxDecoration(
+              color: AppTheme.cutRed.withValues(alpha: 0.1),
+              borderRadius: BorderRadius.circular(20),
+            ),
+            child: Text(
+                count == 1 ? '1 new message' : '$count new messages',
+                style: const TextStyle(
+                    fontSize: 11,
+                    fontWeight: FontWeight.w700,
+                    color: AppTheme.cutRed)),
+          ),
+          const Expanded(child: Divider(color: AppTheme.cutRed, thickness: 0.8)),
+        ]),
+      );
+}
+
+
 class _ReplyQuote extends StatelessWidget {
   final GroupMessage msg;
   final bool mine;
   final bool dense;
-  const _ReplyQuote({required this.msg, required this.mine, this.dense = false});
+  final VoidCallback? onTap;
+  const _ReplyQuote(
+      {required this.msg, required this.mine, this.dense = false, this.onTap});
 
   @override
   Widget build(BuildContext context) {
@@ -2308,7 +2869,9 @@ class _ReplyQuote extends StatelessWidget {
     final textColor = dense
         ? Colors.white
         : (mine ? _myBubbleTextColor : AppTheme.cutDark);
-    return Container(
+    return GestureDetector(
+      onTap: onTap,
+      child: Container(
       margin: const EdgeInsets.only(bottom: 6),
       padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
       decoration: BoxDecoration(
@@ -2334,6 +2897,7 @@ class _ReplyQuote extends StatelessWidget {
                   fontSize: 11,
                   color: textColor.withValues(alpha: 0.85))),
         ],
+      ),
       ),
     );
   }

@@ -28,6 +28,7 @@ dependencies:
   # Images
   image_picker: ^1.1.2
   cached_network_image: ^3.4.1
+  flutter_cache_manager: ^3.4.1
 
   # Media (voice notes + video playback)
   record: ^7.1.1
@@ -35,11 +36,17 @@ dependencies:
   path_provider: ^2.1.4
   video_player: ^2.9.2
 
+  # Chat list scrolling
+  scrollable_positioned_list: ^0.3.8
+
+  # Local storage (unread-message tracking)
+  shared_preferences: ^2.3.2
+
   # Utilities
   intl: ^0.19.0
   url_launcher: ^6.3.1
   flutter_local_notifications: ^17.2.3
-  shared_preferences: ^2.3.2
+
 
 dev_dependencies:
   flutter_test:
