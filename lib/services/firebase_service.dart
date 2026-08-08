@@ -357,16 +357,56 @@ class FirebaseService {
           s.docs.map((d) => GroupMessage.fromMap(d.id, d.data())).toList());
 
   Future<String> sendMessage(GroupMessage m) async {
-    final groupDoc = await _groups.doc(m.groupId).get();
-    final isLocked = groupDoc.data()?['isLocked'] as bool? ?? false;
+    final groupSnap = await _groups.doc(m.groupId).get();
+    final data = groupSnap.data();
+    final isLocked = data?['isLocked'] as bool? ?? false;
     if (isLocked) {
       throw Exception('This group has been locked by an administrator. '
           'New messages cannot be sent.');
     }
+
     final ref =
         await _groups.doc(m.groupId).collection('messages').add(m.toMap());
+
+    // FIX: previously the group document was never updated when a message
+    // was sent — latestMessage/latestMessageAt stayed null forever, which
+    // broke the "last message" preview, chat-list sorting by recency, and
+    // per-user unread badges on the groups screen (they all read these
+    // fields, but nothing was ever writing them). This keeps them in sync.
+    final memberIds = List<String>.from((data?['memberIds'] as List?) ?? []);
+    final update = <String, dynamic>{
+      'latestMessage': _latestMessagePreview(m),
+      'latestSenderName': m.userName,
+      'latestMessageAt': m.createdAt.toIso8601String(),
+    };
+    for (final memberId in memberIds) {
+      if (memberId == m.userId) continue; // sender doesn't badge themselves
+      update['unreadCounts.$memberId'] = FieldValue.increment(1);
+    }
+    await _groups.doc(m.groupId).update(update);
+
     return ref.id;
   }
+
+  String _latestMessagePreview(GroupMessage m) {
+    switch (m.messageType) {
+      case MessageType.image:
+        return '📷 Photo';
+      case MessageType.video:
+        return '🎥 Video';
+      case MessageType.voice:
+        return '🎤 Voice message';
+      case MessageType.location:
+        return '📍 Location';
+      case MessageType.text:
+        return m.text;
+    }
+  }
+
+  // Resets the unread count for ONE user only — per-user, so one member
+  // opening the chat never affects anyone else's unread badge.
+  Future<void> markGroupRead(String gid, String uid) =>
+      _groups.doc(gid).update({'unreadCounts.$uid': 0});
 
   Future<void> updateMessageMedia(String gid, String msgId, String mediaUrl,
           {String? mediaThumbnail, int? mediaDuration}) =>

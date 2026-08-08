@@ -171,10 +171,18 @@ class _SearchHeader extends StatelessWidget {
                     },
                   ),
             filled: true,
-            fillColor: AppTheme.cutGrey,
+            fillColor: Colors.white,
             border: OutlineInputBorder(
               borderRadius: BorderRadius.circular(16),
-              borderSide: BorderSide.none,
+              borderSide: const BorderSide(color: AppTheme.cutBorder),
+            ),
+            enabledBorder: OutlineInputBorder(
+              borderRadius: BorderRadius.circular(16),
+              borderSide: const BorderSide(color: AppTheme.cutBorder),
+            ),
+            focusedBorder: OutlineInputBorder(
+              borderRadius: BorderRadius.circular(16),
+              borderSide: const BorderSide(color: AppTheme.cutBlue, width: 1.5),
             ),
             contentPadding:
                 const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
@@ -235,6 +243,13 @@ class _GroupCard extends StatefulWidget {
 
 class _GroupCardState extends State<_GroupCard> {
   bool _joining = false;
+
+  String _unreadLabel(int count) {
+    if (count <= 0) return '';
+    if (count == 1) return '1 New message';
+    if (count >= 9) return '9+ New messages';
+    return '$count New messages';
+  }
 
   Future<void> _onTap(BuildContext context) async {
     final group = widget.group;
@@ -361,26 +376,33 @@ class _GroupCardState extends State<_GroupCard> {
               ),
               const SizedBox(width: 8),
               if (widget.isMember)
-                Row(mainAxisSize: MainAxisSize.min, children: [
-                  if (unreadCount > 0)
-                    Container(
-                      constraints: const BoxConstraints(minWidth: 22),
-                      padding: const EdgeInsets.symmetric(
-                          horizontal: 7, vertical: 3),
-                      decoration: const BoxDecoration(
-                          color: AppTheme.cutRed, shape: BoxShape.circle),
-                      child: Text(
-                          unreadCount > 99
-                              ? '99+'
-                              : '$unreadCount',
+                Column(
+                  crossAxisAlignment: CrossAxisAlignment.end,
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    _MemberMenu(group: group, uid: uid, isAdmin: isAdmin),
+                    if (unreadCount > 0)
+                      Container(
+                        margin: const EdgeInsets.only(top: 2),
+                        constraints: const BoxConstraints(maxWidth: 108),
+                        padding: const EdgeInsets.symmetric(
+                            horizontal: 8, vertical: 3),
+                        decoration: BoxDecoration(
+                          color: AppTheme.cutRed,
+                          borderRadius: BorderRadius.circular(20),
+                        ),
+                        child: Text(
+                          _unreadLabel(unreadCount),
                           textAlign: TextAlign.center,
+                          overflow: TextOverflow.ellipsis,
                           style: const TextStyle(
                               fontSize: 10,
                               color: Colors.white,
-                              fontWeight: FontWeight.w700)),
-                    ),
-                  _MemberMenu(group: group, uid: uid, isAdmin: isAdmin),
-                ])
+                              fontWeight: FontWeight.w700),
+                        ),
+                      ),
+                  ],
+                )
               else
                 FilledButton(
                   onPressed:

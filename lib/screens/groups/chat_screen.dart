@@ -11,7 +11,6 @@ import 'package:record/record.dart';
 import 'package:scrollable_positioned_list/scrollable_positioned_list.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:provider/provider.dart';
-import 'package:shared_preferences/shared_preferences.dart';
 import 'package:url_launcher/url_launcher.dart';
 import '../../models/group_model.dart';
 import '../../models/user_model.dart';
@@ -107,9 +106,10 @@ class _ChatScreenState extends State<ChatScreen> {
   String? _highlightedMsgId;
   Timer? _highlightTimer;
 
-  // "New messages" divider — captured once per chat-open, based on how
-  // many messages exist at open time vs. locally-remembered last-seen
-  // message for this group (see _maybeCaptureUnreadDivider).
+  // "New messages" divider — captured once per chat-open, from this
+  // user's per-user unreadCounts value in Firestore (set in initState,
+  // before markGroupRead resets it). Correctly reflects only what THIS
+  // user hasn't seen, independent of other members' read state.
   int? _unseenCountAtOpen;
   bool _dividerDismissed = false;
   // Becomes true the first time the user scrolls away from the newest
@@ -124,6 +124,27 @@ class _ChatScreenState extends State<ChatScreen> {
     _groupStream = FirebaseService.instance.groupStream(widget.group.id);
     _messagesStream = FirebaseService.instance.messagesStream(widget.group.id);
     _itemPositionsListener.itemPositions.addListener(_onScrollPositionsChanged);
+
+    final uid = context.read<UserProvider>().user?.id;
+    if (uid != null) {
+      // Capture how many messages were unread for THIS user (per-user,
+      // from Firestore) BEFORE resetting the count — this is what drives
+      // the "X new messages" divider below. Because unreadCounts is keyed
+      // per-user, this correctly reflects only what THIS user hasn't
+      // seen, regardless of whether other members already opened the chat.
+      _unseenCountAtOpen = widget.group.unreadCounts[uid] ?? 0;
+
+      // Per-user only — clears the unread badge on the groups list for
+      // whoever opened this chat, without touching any other member's
+      // count. NOTE: errors here were previously silently swallowed —
+      // if this call is failing (e.g. Firestore rules rejecting the
+      // write), it's now logged instead of hidden.
+      FirebaseService.instance
+          .markGroupRead(widget.group.id, uid)
+          .catchError((e) {
+        debugPrint('markGroupRead failed for group ${widget.group.id}: $e');
+      });
+    }
   }
 
   void _onScrollPositionsChanged() {
@@ -812,7 +833,6 @@ class _ChatScreenState extends State<ChatScreen> {
                         title: 'No messages yet',
                         subtitle: 'Start the conversation.');
                   _currentMsgs = msgs;
-                  _maybeCaptureUnreadDivider(msgs);
                   return Stack(children: [
                     ScrollablePositionedList.builder(
                       itemScrollController: _itemScrollController,
@@ -915,31 +935,6 @@ class _ChatScreenState extends State<ChatScreen> {
         );
       },
     );
-  }
-
-  // Captures "how many messages are new since last visit" exactly once
-  // per chat-open, and remembers the current newest message for next time.
-  void _maybeCaptureUnreadDivider(List<GroupMessage> msgs) {
-    if (_unseenCountAtOpen != null) return; // already captured this session
-    if (msgs.isEmpty) return;
-    // Wait for SharedPreferences to finish loading (initState is async).
-    WidgetsBinding.instance.addPostFrameCallback((_) async {
-      if (!mounted || _unseenCountAtOpen != null) return;
-      final prefs = await SharedPreferences.getInstance();
-      final key = 'last_seen_msg_${widget.group.id}';
-      final lastSeenId = prefs.getString(key);
-      int count;
-      if (lastSeenId == null) {
-        // Never opened this chat before on this device — don't show a
-        // divider for the entire history, just mark everything seen.
-        count = 0;
-      } else {
-        final idx = msgs.indexWhere((m) => m.id == lastSeenId);
-        count = idx == -1 ? 0 : idx; // messages newer than lastSeenId
-      }
-      await prefs.setString(key, msgs.first.id); // remember newest for next time
-      if (mounted) setState(() => _unseenCountAtOpen = count);
-    });
   }
 
   bool _sameDay(DateTime a, DateTime b) =>
